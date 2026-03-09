@@ -122,7 +122,10 @@
         <div id="debug-panel" class="debug-panel hidden">
             <div class="debug-header">
                 <span>Console</span>
-                <button id="btn-clear-log" class="btn-link">Clear</button>
+                <div style="display:flex;gap:8px">
+                    <button id="btn-copy-log" class="btn-link">Copy</button>
+                    <button id="btn-clear-log" class="btn-link">Clear</button>
+                </div>
             </div>
             <div id="debug-log" class="debug-log"></div>
         </div>

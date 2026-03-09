@@ -61,6 +61,30 @@
             _logEl.innerHTML = "";
         });
 
+        document.getElementById("btn-copy-log").addEventListener("click", function () {
+            var lines = _logEl.querySelectorAll(".log-line");
+            var text = Array.prototype.map.call(lines, function (l) { return l.textContent; }).join("\n");
+            if (!text) { return; }
+            navigator.clipboard.writeText(text).then(function () {
+                var btn = document.getElementById("btn-copy-log");
+                btn.textContent = "Copied!";
+                setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+            }).catch(function () {
+                // Fallback for older CEP
+                var ta = document.createElement("textarea");
+                ta.value = text;
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                document.body.removeChild(ta);
+                var btn = document.getElementById("btn-copy-log");
+                btn.textContent = "Copied!";
+                setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+            });
+        });
+
         // Log system info immediately
         console.log("DeadAir v1.0.1 ready");
         console.log("Platform: " + navigator.platform);
