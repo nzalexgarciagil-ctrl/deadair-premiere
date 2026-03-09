@@ -424,69 +424,244 @@
     }
 
     // ============================================================
-    // LOAD AUDIO BUFFER — handles both audio and video files
+    // LOAD AUDIO BUFFER
+    // Strategy: Node.js fs (small files) → FFmpeg (video/large) → XHR fallback
     // ============================================================
+
+    var _nodeRequire = null;
+    function getNodeRequire() {
+        if (_nodeRequire) return _nodeRequire;
+        try {
+            if (typeof cep_node !== "undefined" && cep_node && typeof cep_node.require === "function") {
+                _nodeRequire = cep_node.require;
+                console.log("Node.js: cep_node.require available");
+            } else if (typeof require === "function") {
+                _nodeRequire = require;
+                console.log("Node.js: global require available");
+            } else {
+                console.warn("Node.js: NOT available — large video files may fail");
+            }
+        } catch (e) {
+            console.warn("Node.js detection error: " + e.message);
+        }
+        return _nodeRequire;
+    }
 
     function loadAudioBuffer(clip, callback) {
         var rawPath = clip.mediaPath;
+        console.log("Loading: " + clip.name);
+        console.log("  Path: " + rawPath);
+        console.log("  In=" + clip.inPointSeconds.toFixed(2) + "s Out=" + clip.outPointSeconds.toFixed(2) + "s");
+
+        var nr = getNodeRequire();
+        if (nr) {
+            loadViaNode(rawPath, clip, nr, callback);
+        } else {
+            loadViaXHR(rawPath, clip, callback);
+        }
+    }
+
+    function loadViaNode(rawPath, clip, nr, callback) {
+        try {
+            var fs = nr("fs");
+            var stat;
+            try { stat = fs.statSync(rawPath); } catch (e) {
+                console.error("  fs.statSync failed: " + e.message);
+                callback("File not found or inaccessible: " + rawPath);
+                return;
+            }
+
+            var sizeMB = stat.size / 1024 / 1024;
+            console.log("  File size: " + sizeMB.toFixed(1) + "MB");
+
+            var isVideoExt = /\.(mov|mp4|mxf|avi|mts|m2ts|r3d|braw|arw|dng)$/i.test(rawPath);
+
+            if (!isVideoExt && sizeMB < 150) {
+                // Small audio file — read directly
+                console.log("  Strategy: fs.readFile (audio, small)");
+                fs.readFile(rawPath, function (err, data) {
+                    if (err) {
+                        console.warn("  fs.readFile failed: " + err.message + " — trying FFmpeg");
+                        tryFFmpeg(rawPath, clip, nr, callback);
+                        return;
+                    }
+                    // Node Buffer → ArrayBuffer
+                    var ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+                    decodeArrayBuffer(ab, clip, callback);
+                });
+            } else {
+                // Video or large file — extract audio via FFmpeg
+                console.log("  Strategy: FFmpeg audio extraction (video/large file)");
+                tryFFmpeg(rawPath, clip, nr, callback);
+            }
+        } catch (e) {
+            console.error("  loadViaNode exception: " + e.message);
+            loadViaXHR(rawPath, clip, callback);
+        }
+    }
+
+    function tryFFmpeg(rawPath, clip, nr, callback) {
+        findFFmpeg(nr, function (ffmpegPath) {
+            if (!ffmpegPath) {
+                console.error("  FFmpeg not found. Install: winget install ffmpeg  OR  brew install ffmpeg");
+                callback(
+                    "FFmpeg required for video files but not found.\n" +
+                    "Install it:\n" +
+                    "  Windows: winget install ffmpeg\n" +
+                    "  Mac: brew install ffmpeg\n" +
+                    "Then restart Premiere Pro."
+                );
+                return;
+            }
+
+            console.log("  FFmpeg: " + ffmpegPath);
+
+            var cp = nr("child_process");
+            // Extract audio: mono, 22050Hz, WAV piped to stdout — fast & tiny
+            var args = ["-i", rawPath, "-vn", "-ac", "1", "-ar", "22050", "-f", "wav", "pipe:1"];
+            console.log("  Running: ffmpeg " + args.join(" ").substring(0, 80) + "...");
+
+            var chunks = [];
+            var totalBytes = 0;
+            var stderr = "";
+
+            var proc;
+            try {
+                proc = cp.spawn(ffmpegPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+            } catch (e) {
+                console.error("  spawn failed: " + e.message);
+                callback("FFmpeg spawn error: " + e.message);
+                return;
+            }
+
+            proc.stdout.on("data", function (chunk) {
+                chunks.push(chunk);
+                totalBytes += chunk.length;
+            });
+            proc.stderr.on("data", function (d) { stderr += d.toString(); });
+
+            proc.on("close", function (code) {
+                console.log("  FFmpeg done: " + (totalBytes / 1024).toFixed(0) + "KB, exit=" + code);
+                if (totalBytes === 0) {
+                    console.error("  FFmpeg stderr: " + stderr.substring(0, 400));
+                    callback("FFmpeg produced no audio output for " + clip.name + ". File may have no audio track.");
+                    return;
+                }
+                var combined = Buffer.concat(chunks);
+                var ab = combined.buffer.slice(combined.byteOffset, combined.byteOffset + combined.byteLength);
+                decodeArrayBuffer(ab, clip, callback);
+            });
+
+            proc.on("error", function (err) {
+                console.error("  FFmpeg process error: " + err.message);
+                callback("FFmpeg error: " + err.message);
+            });
+        });
+    }
+
+    var _ffmpegCache = null;
+    function findFFmpeg(nr, callback) {
+        if (_ffmpegCache) { callback(_ffmpegCache); return; }
+
+        // Check localStorage
+        try {
+            var cached = localStorage.getItem("deadair_ffmpeg");
+            if (cached) {
+                var fs = nr("fs");
+                if (fs.existsSync(cached)) {
+                    console.log("  FFmpeg (cached): " + cached);
+                    _ffmpegCache = cached;
+                    callback(cached);
+                    return;
+                }
+                localStorage.removeItem("deadair_ffmpeg");
+            }
+        } catch (e) {}
+
+        var isWin = navigator.platform.indexOf("Win") !== -1;
+        var cp = nr("child_process");
+        var fs = nr("fs");
+
+        // Try PATH first
+        var whichCmd = isWin ? "where ffmpeg" : "which ffmpeg";
+        cp.exec(whichCmd, function (err, stdout) {
+            if (!err && stdout && stdout.trim()) {
+                var p = stdout.trim().split("\n")[0].trim();
+                console.log("  FFmpeg on PATH: " + p);
+                _ffmpegCache = p;
+                try { localStorage.setItem("deadair_ffmpeg", p); } catch (e) {}
+                callback(p);
+                return;
+            }
+
+            // Check common install locations
+            var paths = isWin ? [
+                "C:\\ffmpeg\\bin\\ffmpeg.exe",
+                "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+                "C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe"
+            ] : [
+                "/usr/local/bin/ffmpeg",
+                "/opt/homebrew/bin/ffmpeg",
+                "/usr/bin/ffmpeg"
+            ];
+
+            for (var i = 0; i < paths.length; i++) {
+                try {
+                    if (fs.existsSync(paths[i])) {
+                        console.log("  FFmpeg found at: " + paths[i]);
+                        _ffmpegCache = paths[i];
+                        try { localStorage.setItem("deadair_ffmpeg", paths[i]); } catch (e) {}
+                        callback(paths[i]);
+                        return;
+                    }
+                } catch (e) {}
+            }
+
+            console.warn("  FFmpeg not found in PATH or common locations");
+            callback(null);
+        });
+    }
+
+    function decodeArrayBuffer(ab, clip, callback) {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) { callback("Web Audio API unavailable"); return; }
+        var ctx = new AudioCtx();
+        console.log("  Decoding " + (ab.byteLength / 1024).toFixed(0) + "KB with Web Audio API...");
+        ctx.decodeAudioData(ab,
+            function (buffer) {
+                ctx.close();
+                console.log("  OK: " + buffer.numberOfChannels + "ch " + buffer.sampleRate + "Hz " + buffer.duration.toFixed(1) + "s");
+                callback(null, buffer, clip);
+            },
+            function (err) {
+                ctx.close();
+                var msg = "Decode failed: " + (err ? err.message || String(err) : "unknown codec");
+                console.error("  " + msg);
+                callback(msg);
+            }
+        );
+    }
+
+    function loadViaXHR(rawPath, clip, callback) {
         var urlPath = rawPath.replace(/\\/g, "/");
         if (urlPath.charAt(0) !== "/") urlPath = "/" + urlPath;
         var fileUrl = "file://" + urlPath;
-
-        console.log("Loading: " + clip.name);
-        console.log("  Path: " + rawPath);
-        console.log("  URL:  " + fileUrl);
-        console.log("  In=" + clip.inPointSeconds.toFixed(2) + "s Out=" + clip.outPointSeconds.toFixed(2) + "s Timeline=" + clip.startSeconds.toFixed(2) + "-" + clip.endSeconds.toFixed(2) + "s");
+        console.log("  Strategy: XHR fallback — " + fileUrl);
 
         var xhr = new XMLHttpRequest();
         xhr.open("GET", fileUrl, true);
         xhr.responseType = "arraybuffer";
         xhr.timeout = 30000;
-
-        xhr.ontimeout = function () {
-            console.error("TIMEOUT: " + clip.name);
-            callback("Timeout loading: " + clip.name);
-        };
-
-        xhr.onerror = function () {
-            console.error("XHR ERROR: " + clip.name + " status=" + xhr.status);
-            callback("Cannot read file: " + rawPath + "\n  (Try: --allow-file-access-from-files may need Premiere restart)");
-        };
-
+        xhr.ontimeout = function () { callback("XHR timeout for " + clip.name); };
+        xhr.onerror   = function () { callback("XHR error for " + clip.name + " (status " + xhr.status + ")"); };
         xhr.onload = function () {
             console.log("  XHR status=" + xhr.status + " bytes=" + (xhr.response ? xhr.response.byteLength : 0));
-
             if (!xhr.response || xhr.response.byteLength === 0) {
-                console.error("  Empty response — file may be inaccessible or video-only");
-                callback("Empty response for: " + clip.name + " — is it a video clip with no audio track?");
+                callback("XHR returned empty body — video files require Node.js (enable-nodejs flag missing?)");
                 return;
             }
-
-            var AudioCtx = window.AudioContext || window.webkitAudioContext;
-            if (!AudioCtx) {
-                console.error("  Web Audio API missing");
-                callback("Web Audio API not available in this CEP version.");
-                return;
-            }
-            var ctx = new AudioCtx();
-            console.log("  Decoding " + (xhr.response.byteLength / 1024).toFixed(0) + "KB...");
-
-            ctx.decodeAudioData(
-                xhr.response,
-                function (buffer) {
-                    ctx.close();
-                    console.log("  Decoded OK: " + buffer.numberOfChannels + "ch " + buffer.sampleRate + "Hz " + buffer.duration.toFixed(1) + "s");
-                    callback(null, buffer, clip);
-                },
-                function (decodeErr) {
-                    ctx.close();
-                    var msg = "Decode failed for " + clip.name + ": " + (decodeErr ? decodeErr.message || String(decodeErr) : "unknown codec");
-                    console.error("  " + msg);
-                    callback(msg);
-                }
-            );
+            decodeArrayBuffer(xhr.response, clip, callback);
         };
-
         xhr.send();
     }
 
