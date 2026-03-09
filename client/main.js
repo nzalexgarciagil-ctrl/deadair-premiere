@@ -1,54 +1,54 @@
 /**
  * DeadAir - Silence Remover for Adobe Premiere Pro
- * Frontend controller
+ * Frontend controller — uses Web Audio API for analysis, no FFmpeg required.
  */
 
 (function () {
     "use strict";
 
     var cs = new CSInterface();
-    var analysisResults = null; // Cached silence regions from last analysis
+    var analysisResults = null;
 
     // ============================================================
     // DOM REFERENCES
     // ============================================================
 
     var dom = {
-        statusBar: document.getElementById("status-bar"),
-        statusText: document.getElementById("status-text"),
-        threshold: document.getElementById("threshold"),
-        thresholdValue: document.getElementById("threshold-value"),
-        minDuration: document.getElementById("min-duration"),
-        durationValue: document.getElementById("duration-value"),
-        padding: document.getElementById("padding"),
-        paddingValue: document.getElementById("padding-value"),
-        trackSelect: document.getElementById("track-select"),
-        btnAnalyze: document.getElementById("btn-analyze"),
-        btnExecute: document.getElementById("btn-execute"),
-        btnCancel: document.getElementById("btn-cancel"),
+        statusBar:       document.getElementById("status-bar"),
+        statusText:      document.getElementById("status-text"),
+        threshold:       document.getElementById("threshold"),
+        thresholdValue:  document.getElementById("threshold-value"),
+        minDuration:     document.getElementById("min-duration"),
+        durationValue:   document.getElementById("duration-value"),
+        padding:         document.getElementById("padding"),
+        paddingValue:    document.getElementById("padding-value"),
+        trackSelect:     document.getElementById("track-select"),
+        btnAnalyze:      document.getElementById("btn-analyze"),
+        btnExecute:      document.getElementById("btn-execute"),
+        btnCancel:       document.getElementById("btn-cancel"),
         btnClearMarkers: document.getElementById("btn-clear-markers"),
-        confirmActions: document.getElementById("confirm-actions"),
+        confirmActions:  document.getElementById("confirm-actions"),
         progressContainer: document.getElementById("progress-container"),
-        progressFill: document.getElementById("progress-fill"),
-        progressText: document.getElementById("progress-text"),
-        results: document.getElementById("results"),
-        regionCount: document.getElementById("region-count"),
-        totalSilence: document.getElementById("total-silence")
+        progressFill:    document.getElementById("progress-fill"),
+        progressText:    document.getElementById("progress-text"),
+        results:         document.getElementById("results"),
+        regionCount:     document.getElementById("region-count"),
+        totalSilence:    document.getElementById("total-silence")
     };
 
     // ============================================================
-    // INITIALIZATION
+    // INIT
     // ============================================================
 
     function init() {
         bindSliders();
         bindButtons();
         loadSettings();
-        refreshTrackList();
+        setTimeout(refreshTrackList, 500);
     }
 
     // ============================================================
-    // SLIDER BINDINGS
+    // SLIDERS
     // ============================================================
 
     function bindSliders() {
@@ -56,12 +56,10 @@
             dom.thresholdValue.textContent = this.value + " dB";
             saveSettings();
         });
-
         dom.minDuration.addEventListener("input", function () {
             dom.durationValue.textContent = parseFloat(this.value).toFixed(1) + "s";
             saveSettings();
         });
-
         dom.padding.addEventListener("input", function () {
             dom.paddingValue.textContent = this.value + "ms";
             saveSettings();
@@ -69,7 +67,7 @@
     }
 
     // ============================================================
-    // BUTTON BINDINGS
+    // BUTTONS
     // ============================================================
 
     function bindButtons() {
@@ -77,9 +75,6 @@
         dom.btnExecute.addEventListener("click", executeRemoval);
         dom.btnCancel.addEventListener("click", cancelAnalysis);
         dom.btnClearMarkers.addEventListener("click", clearMarkers);
-
-        // Refresh track list when panel becomes visible
-        cs.addEventListener("com.adobe.csxs.events.ApplicationActivate", refreshTrackList);
     }
 
     // ============================================================
@@ -87,239 +82,257 @@
     // ============================================================
 
     function refreshTrackList() {
-        evalScript("getSequenceInfo()", function (response) {
-            var r = parseResponse(response);
-            if (!r || !r.success) return;
-
+        evalScript("getSequenceInfo()", function (resp) {
+            var r = parseResp(resp);
+            if (!r || !r.success) {
+                showStatus("Open a sequence to begin.", "info");
+                return;
+            }
+            hideStatus();
+            var sel = dom.trackSelect;
+            while (sel.options.length > 1) sel.remove(1);
             var data = r.data;
-            var select = dom.trackSelect;
-            var currentVal = select.value;
-
-            // Clear options except "All"
-            while (select.options.length > 1) {
-                select.remove(1);
-            }
-
             for (var i = 0; i < data.audioTracks.length; i++) {
-                var track = data.audioTracks[i];
+                var t = data.audioTracks[i];
                 var opt = document.createElement("option");
-                opt.value = String(track.index);
-                opt.textContent = track.name + " (" + track.clipCount + " clips)";
-                select.appendChild(opt);
-            }
-
-            // Restore previous selection if still valid
-            if (currentVal) {
-                for (var i = 0; i < select.options.length; i++) {
-                    if (select.options[i].value === currentVal) {
-                        select.value = currentVal;
-                        break;
-                    }
-                }
+                opt.value = String(t.index);
+                opt.textContent = t.name + " (" + t.clipCount + " clips)";
+                sel.appendChild(opt);
             }
         });
     }
 
     // ============================================================
-    // ANALYSIS
+    // ANALYSIS — Web Audio API (no FFmpeg required)
     // ============================================================
 
     function startAnalysis() {
         analysisResults = null;
         hideResults();
-        showProgress("Preparing analysis...");
         dom.btnAnalyze.disabled = true;
+        dom.confirmActions.classList.add("hidden");
 
-        // Get selected track indices
         var trackIndices = getSelectedTrackIndices();
 
-        // Get clip media paths from ExtendScript
-        evalScript('getClipMediaPaths(' + JSON.stringify(JSON.stringify(trackIndices)) + ')', function (response) {
-            var r = parseResponse(response);
+        showProgress("Getting clip info...", 5);
+        evalScript('getClipMediaPaths(' + JSON.stringify(JSON.stringify(trackIndices)) + ')', function (resp) {
+            var r = parseResp(resp);
             if (!r || !r.success) {
-                showStatus("Failed to get clip info: " + (r ? r.error : "Unknown error"), "error");
-                hideProgress();
-                dom.btnAnalyze.disabled = false;
-                return;
+                showStatus("Failed to get clip info: " + (r ? r.error : "ExtendScript error"), "error");
+                hideProgress(); dom.btnAnalyze.disabled = false; return;
             }
 
-            var clips = r.data;
+            var clips = r.data.filter(function (c) { return c.mediaPath && c.mediaPath.length > 0; });
             if (clips.length === 0) {
-                showStatus("No clips found on selected tracks.", "error");
-                hideProgress();
-                dom.btnAnalyze.disabled = false;
-                return;
+                showStatus("No clips with media found on selected tracks.", "error");
+                hideProgress(); dom.btnAnalyze.disabled = false; return;
             }
 
-            // Check for clips without media paths
-            var validClips = clips.filter(function (c) { return c.mediaPath && c.mediaPath.length > 0; });
-            if (validClips.length === 0) {
-                showStatus("No media files found. Clips may be offline.", "error");
-                hideProgress();
-                dom.btnAnalyze.disabled = false;
-                return;
-            }
-
-            showProgress("Analyzing " + validClips.length + " clip(s)...");
-            runFFmpegAnalysis(validClips);
+            analyzeClipsWithWebAudio(clips);
         });
     }
 
-    function runFFmpegAnalysis(clips) {
-        var threshold = parseInt(dom.threshold.value);
-        var duration = parseFloat(dom.minDuration.value);
+    function analyzeClipsWithWebAudio(clips) {
+        var threshold = parseFloat(dom.threshold.value);
+        var minDuration = parseFloat(dom.minDuration.value);
         var paddingSec = parseInt(dom.padding.value) / 1000;
 
-        // Get extension path for Node script location
-        evalScript("getExtensionPath()", function (response) {
-            var r = parseResponse(response);
-            if (!r || !r.success) {
-                showStatus("Cannot determine extension path.", "error");
-                hideProgress();
-                dom.btnAnalyze.disabled = false;
+        var thresholdLinear = Math.pow(10, threshold / 20);
+        var allRegions = [];
+        var idx = 0;
+
+        function processNext() {
+            if (idx >= clips.length) {
+                finishAnalysis(allRegions);
                 return;
             }
+            var clip = clips[idx++];
+            var pct = Math.round((idx / clips.length) * 85) + 5;
+            showProgress("Analyzing clip " + idx + " of " + clips.length + "...", pct);
 
-            var extPath = r.data.path;
-            var nodePath = extPath + getPathSep() + "node" + getPathSep() + "analyze.js";
+            analyzeOneClip(clip, thresholdLinear, minDuration, paddingSec)
+                .then(function (regions) {
+                    for (var i = 0; i < regions.length; i++) allRegions.push(regions[i]);
+                    processNext();
+                })
+                .catch(function (err) {
+                    console.warn("[DeadAir] Skipping clip (decode error):", clip.name, err.message || err);
+                    processNext(); // Skip unreadable clips, continue
+                });
+        }
 
-            // Also get FFmpeg path
-            evalScript("getFFmpegPath()", function (ffmpegResponse) {
-                var fr = parseResponse(ffmpegResponse);
-                var ffmpegPath = "ffmpeg";
-                if (fr && fr.success && fr.data) {
-                    ffmpegPath = fr.data.path;
+        processNext();
+    }
+
+    /**
+     * Analyze a single clip for silence using the Web Audio API.
+     * Returns a Promise resolving to an array of {start, end} regions in timeline seconds.
+     */
+    function analyzeOneClip(clip, thresholdLinear, minDuration, padding) {
+        return new Promise(function (resolve, reject) {
+            // Build a file:// URL from the OS path
+            var fileUrl = "file:///" + clip.mediaPath.replace(/\\/g, "/").replace(/^\//, "");
+
+            // Fetch the file as an ArrayBuffer
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", fileUrl, true);
+            xhr.responseType = "arraybuffer";
+
+            xhr.onerror = function () {
+                reject(new Error("Failed to load: " + clip.mediaPath));
+            };
+
+            xhr.onload = function () {
+                if (xhr.status !== 0 && xhr.status !== 200) {
+                    reject(new Error("HTTP " + xhr.status + " loading " + clip.mediaPath));
+                    return;
+                }
+                if (!xhr.response || xhr.response.byteLength === 0) {
+                    reject(new Error("Empty response for " + clip.mediaPath));
+                    return;
                 }
 
-                // Build batch job
-                var job = {
-                    clips: clips.map(function (c) {
-                        return {
-                            mediaPath: c.mediaPath,
-                            startSeconds: c.startSeconds,
-                            endSeconds: c.endSeconds,
-                            inPointSeconds: c.inPointSeconds
-                        };
-                    }),
-                    threshold: threshold,
-                    duration: duration,
-                    padding: paddingSec,
-                    ffmpeg: ffmpegPath,
-                    mode: "intersection"
-                };
+                var AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) {
+                    reject(new Error("Web Audio API not available"));
+                    return;
+                }
+                var ctx = new AudioCtx();
 
-                // Run Node.js analyzer
-                var nodeBin = cs.getSystemPath(SystemPath.APPLICATION);
-                // CEP provides a Node.js runtime we can use
-                var nodeRuntime = getNodePath();
-
-                showProgress("Running FFmpeg analysis...");
-                setProgress(30);
-
-                // Use CSInterface.evalScript to call system command via ExtendScript,
-                // or use the built-in Node.js runtime
-                runNodeProcess(nodeRuntime, nodePath, job, function (err, result) {
-                    if (err) {
-                        showStatus("Analysis failed: " + err, "error");
-                        hideProgress();
-                        dom.btnAnalyze.disabled = false;
-                        return;
+                ctx.decodeAudioData(
+                    xhr.response,
+                    function (buffer) {
+                        ctx.close();
+                        var regions = findSilentRegions(buffer, clip, thresholdLinear, minDuration, padding);
+                        resolve(regions);
+                    },
+                    function (err) {
+                        ctx.close();
+                        reject(new Error("Decode failed for " + clip.name + ": " + (err ? err.message : "unknown")));
                     }
+                );
+            };
 
-                    setProgress(100);
-
-                    if (!result.success) {
-                        showStatus("Analysis error: " + result.error, "error");
-                        hideProgress();
-                        dom.btnAnalyze.disabled = false;
-                        return;
-                    }
-
-                    analysisResults = result.data;
-                    showAnalysisResults(result.data);
-                    hideProgress();
-                    dom.btnAnalyze.disabled = false;
-                });
-            });
+            xhr.send();
         });
     }
 
-    function runNodeProcess(nodePath, scriptPath, job, callback) {
-        // Use CEP's built-in Node.js to spawn the analysis process
-        try {
-            var childProcess = cep_node.require("child_process");
-            var jobStr = JSON.stringify(job);
+    /**
+     * Scan decoded AudioBuffer for silent regions.
+     * Converts source-file timestamps → timeline timestamps.
+     */
+    function findSilentRegions(buffer, clip, thresholdLinear, minDuration, padding) {
+        var sampleRate = buffer.sampleRate;
+        var numChannels = buffer.numberOfChannels;
 
-            var proc = childProcess.spawn(nodePath, [scriptPath], {
-                stdio: ["pipe", "pipe", "pipe"]
-            });
+        // Only analyze the portion of the file used in the timeline (in-point to out-point)
+        var startSample = Math.floor(clip.inPointSeconds * sampleRate);
+        var endSample   = Math.floor(clip.outPointSeconds * sampleRate);
+        endSample = Math.min(endSample, buffer.length);
 
-            var stdout = "";
-            var stderr = "";
-
-            proc.stdout.on("data", function (data) {
-                stdout += data.toString();
-            });
-
-            proc.stderr.on("data", function (data) {
-                stderr += data.toString();
-            });
-
-            proc.on("close", function (code) {
-                try {
-                    // Try stdout first, then stderr for the JSON result
-                    var output = stdout.trim() || stderr.trim();
-                    var result = JSON.parse(output);
-                    callback(null, result);
-                } catch (e) {
-                    callback("Failed to parse analysis result. stdout: " + stdout.substring(0, 200) +
-                             " stderr: " + stderr.substring(0, 200));
-                }
-            });
-
-            proc.on("error", function (err) {
-                callback("Failed to start analyzer: " + err.message +
-                         "\n\nMake sure Node.js is installed.");
-            });
-
-            // Send job via stdin
-            proc.stdin.write(jobStr);
-            proc.stdin.end();
-
-            // Progress simulation
-            var progressInterval = setInterval(function () {
-                var current = parseInt(dom.progressFill.style.width) || 30;
-                if (current < 90) {
-                    setProgress(current + 5);
-                }
-            }, 500);
-
-            proc.on("close", function () {
-                clearInterval(progressInterval);
-            });
-
-        } catch (e) {
-            callback("Node.js runtime unavailable: " + e.message +
-                     "\n\nCEP Node.js integration required.");
+        // Build channel data references
+        var channels = [];
+        for (var c = 0; c < numChannels; c++) {
+            channels.push(buffer.getChannelData(c));
         }
+
+        // Analyze in 50ms windows
+        var windowSize = Math.max(1, Math.floor(sampleRate * 0.05));
+        var regions = [];
+        var inSilence = false;
+        var silenceStart = 0;
+
+        for (var i = startSample; i < endSample; i += windowSize) {
+            var maxAmp = 0;
+            var wEnd = Math.min(i + windowSize, endSample);
+
+            // Find peak amplitude across all channels in this window
+            for (var j = i; j < wEnd; j++) {
+                for (var c = 0; c < channels.length; c++) {
+                    var v = channels[c][j];
+                    if (v < 0) v = -v;
+                    if (v > maxAmp) maxAmp = v;
+                }
+            }
+
+            // Time of this window in the SOURCE file
+            var sourceTimeSec = i / sampleRate;
+            // Convert to timeline time: offset from in-point, added to clip's timeline start
+            var timelineSec = clip.startSeconds + (sourceTimeSec - clip.inPointSeconds);
+
+            if (maxAmp < thresholdLinear) {
+                if (!inSilence) {
+                    inSilence = true;
+                    silenceStart = timelineSec;
+                }
+            } else {
+                if (inSilence) {
+                    inSilence = false;
+                    var silenceDuration = timelineSec - silenceStart;
+                    if (silenceDuration >= minDuration) {
+                        var s = silenceStart + padding;
+                        var e = timelineSec   - padding;
+                        if (e - s > 0.05) regions.push({ start: round3(s), end: round3(e) });
+                    }
+                }
+            }
+        }
+
+        // Handle silence extending to clip end
+        if (inSilence) {
+            var clipEndTimeline = clip.endSeconds;
+            var silenceDuration = clipEndTimeline - silenceStart;
+            if (silenceDuration >= minDuration) {
+                var s = silenceStart + padding;
+                var e = clipEndTimeline - padding;
+                if (e - s > 0.05) regions.push({ start: round3(s), end: round3(e) });
+            }
+        }
+
+        return regions;
     }
 
-    // ============================================================
-    // RESULTS DISPLAY
-    // ============================================================
-
-    function showAnalysisResults(data) {
-        dom.regionCount.textContent = data.regions.length + " region" + (data.regions.length !== 1 ? "s" : "");
-        dom.totalSilence.textContent = formatDuration(data.totalSilence);
-        dom.results.classList.remove("hidden");
-        dom.confirmActions.classList.remove("hidden");
-
-        if (data.regions.length === 0) {
-            showStatus("No silence detected with current settings. Try adjusting the threshold.", "");
-            dom.confirmActions.classList.add("hidden");
-        } else {
-            showStatus("Found " + data.regions.length + " silent regions. Review and confirm.", "success");
+    function finishAnalysis(allRegions) {
+        // Merge overlapping regions and sort
+        var merged = mergeRegions(allRegions);
+        var totalSilence = 0;
+        for (var i = 0; i < merged.length; i++) {
+            totalSilence += merged[i].end - merged[i].start;
         }
+
+        analysisResults = { regions: merged, totalSilence: round3(totalSilence) };
+        setProgress(100);
+
+        setTimeout(function () {
+            hideProgress();
+            dom.btnAnalyze.disabled = false;
+
+            if (merged.length === 0) {
+                showStatus("No silence detected. Try a higher threshold (less negative).", "info");
+                return;
+            }
+
+            dom.regionCount.textContent = merged.length + " region" + (merged.length !== 1 ? "s" : "");
+            dom.totalSilence.textContent = formatDuration(totalSilence) + " total";
+            dom.results.classList.remove("hidden");
+            dom.confirmActions.classList.remove("hidden");
+            showStatus("Found " + merged.length + " silent regions. Ready to remove.", "success");
+        }, 300);
+    }
+
+    function mergeRegions(regions) {
+        if (!regions.length) return [];
+        regions.sort(function (a, b) { return a.start - b.start; });
+        var merged = [{ start: regions[0].start, end: regions[0].end }];
+        for (var i = 1; i < regions.length; i++) {
+            var last = merged[merged.length - 1];
+            if (regions[i].start <= last.end + 0.1) {
+                if (regions[i].end > last.end) last.end = regions[i].end;
+            } else {
+                merged.push({ start: regions[i].start, end: regions[i].end });
+            }
+        }
+        return merged;
     }
 
     // ============================================================
@@ -327,66 +340,51 @@
     // ============================================================
 
     function executeRemoval() {
-        if (!analysisResults || analysisResults.regions.length === 0) {
-            showStatus("No analysis results. Run analysis first.", "error");
+        if (!analysisResults || !analysisResults.regions.length) {
+            showStatus("No results. Run analysis first.", "error");
             return;
         }
 
-        var mode = document.querySelector('input[name="cut-mode"]:checked').value;
+        var mode         = document.querySelector('input[name="cut-mode"]:checked').value;
         var trackIndices = getSelectedTrackIndices();
-        var regionsStr = JSON.stringify(analysisResults.regions);
-        var trackIndicesStr = JSON.stringify(trackIndices);
+        var regionsStr   = JSON.stringify(analysisResults.regions);
+        var tracksStr    = JSON.stringify(trackIndices);
 
         dom.btnExecute.disabled = true;
-        dom.btnCancel.disabled = true;
+        dom.btnCancel.disabled  = true;
+        showStatus("Applying to timeline...", "info");
 
-        showStatus("Applying changes...", "");
+        var esc = function (s) { return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"; };
 
-        var escRegions = escapeForEval(regionsStr);
-        var escTracks = escapeForEval(trackIndicesStr);
-
+        var scriptCall;
         if (mode === "markers") {
-            evalScript('addSilenceMarkers(' + escRegions + ')', function (response) {
-                handleExecuteResult(response, "markers");
-            });
+            scriptCall = "addSilenceMarkers(" + esc(regionsStr) + ")";
         } else if (mode === "disable") {
-            evalScript('disableSilentRegions(' + escRegions + ',' + escTracks + ')', function (response) {
-                handleExecuteResult(response, "disabled");
-            });
+            scriptCall = "disableSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
         } else {
-            // Ripple delete
-            evalScript('rippleDeleteSilentRegions(' + escRegions + ',' + escTracks + ')', function (response) {
-                handleExecuteResult(response, "deleted");
-            });
+            scriptCall = "rippleDeleteSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
         }
-    }
 
-    function handleExecuteResult(response, action) {
-        var r = parseResponse(response);
-        dom.btnExecute.disabled = false;
-        dom.btnCancel.disabled = false;
+        evalScript(scriptCall, function (resp) {
+            dom.btnExecute.disabled = false;
+            dom.btnCancel.disabled  = false;
 
-        if (r && r.success) {
-            var msg;
-            if (action === "markers") {
-                msg = "Added " + r.data.markersAdded + " markers. Use Ctrl+Z to undo.";
-            } else if (action === "disabled") {
-                msg = "Disabled " + r.data.disabledCount + " clip segments. Use Ctrl+Z to undo.";
+            var r = parseResp(resp);
+            if (r && r.success) {
+                var count = r.data.markersAdded || r.data.disabledCount || r.data.deletedCount || 0;
+                var verb  = mode === "markers" ? "markers added" : mode === "disable" ? "clips disabled" : "regions deleted";
+                showStatus(count + " " + verb + ". Press Ctrl+Z to undo.", "success");
+                cancelAnalysis();
             } else {
-                msg = "Ripple deleted " + r.data.deletedCount + " regions. Use Ctrl+Z to undo.";
+                showStatus("Error: " + (r ? r.error : "Unknown"), "error");
             }
-            showStatus(msg, "success");
-            cancelAnalysis(); // Reset UI
-        } else {
-            showStatus("Failed: " + (r ? r.error : "Unknown error"), "error");
-        }
+        });
     }
 
     function cancelAnalysis() {
         analysisResults = null;
         hideResults();
         dom.confirmActions.classList.add("hidden");
-        hideStatus();
     }
 
     // ============================================================
@@ -394,74 +392,57 @@
     // ============================================================
 
     function clearMarkers() {
-        evalScript("clearSilenceMarkers()", function (response) {
-            var r = parseResponse(response);
+        evalScript("clearSilenceMarkers()", function (resp) {
+            var r = parseResp(resp);
             if (r && r.success) {
                 showStatus("Removed " + r.data.removed + " silence markers.", "success");
             } else {
-                showStatus("Failed to clear markers: " + (r ? r.error : "Unknown"), "error");
+                showStatus("Failed: " + (r ? r.error : "Unknown"), "error");
             }
         });
     }
 
     // ============================================================
-    // SETTINGS PERSISTENCE
+    // SETTINGS
     // ============================================================
 
     function getSettings() {
         return {
-            threshold: dom.threshold.value,
+            threshold:   dom.threshold.value,
             minDuration: dom.minDuration.value,
-            padding: dom.padding.value,
-            trackSelect: dom.trackSelect.value,
-            cutMode: document.querySelector('input[name="cut-mode"]:checked').value
+            padding:     dom.padding.value,
+            cutMode:     document.querySelector('input[name="cut-mode"]:checked').value
         };
     }
 
     function saveSettings() {
-        var settings = getSettings();
-        var settingsStr = JSON.stringify(settings);
-        evalScript('saveSettings(' + escapeForEval(settingsStr) + ')');
+        try {
+            localStorage.setItem("deadair_settings", JSON.stringify(getSettings()));
+        } catch (e) {}
     }
 
     function loadSettings() {
-        evalScript("loadSettings()", function (response) {
-            if (!response || response === "null" || response === "EvalScript error.") return;
-
-            try {
-                var settings;
-                // Response might be double-wrapped
-                try {
-                    var outer = JSON.parse(response);
-                    if (outer.success && outer.data) {
-                        settings = outer.data;
-                    } else {
-                        settings = JSON.parse(response);
-                    }
-                } catch (e) {
-                    settings = JSON.parse(response);
-                }
-
-                if (settings.threshold !== undefined) {
-                    dom.threshold.value = settings.threshold;
-                    dom.thresholdValue.textContent = settings.threshold + " dB";
-                }
-                if (settings.minDuration !== undefined) {
-                    dom.minDuration.value = settings.minDuration;
-                    dom.durationValue.textContent = parseFloat(settings.minDuration).toFixed(1) + "s";
-                }
-                if (settings.padding !== undefined) {
-                    dom.padding.value = settings.padding;
-                    dom.paddingValue.textContent = settings.padding + "ms";
-                }
-                if (settings.cutMode) {
-                    var radio = document.querySelector('input[name="cut-mode"][value="' + settings.cutMode + '"]');
-                    if (radio) radio.checked = true;
-                }
-            } catch (e) {
-                // Settings file may not exist yet
+        try {
+            var raw = localStorage.getItem("deadair_settings");
+            if (!raw) return;
+            var s = JSON.parse(raw);
+            if (s.threshold !== undefined) {
+                dom.threshold.value = s.threshold;
+                dom.thresholdValue.textContent = s.threshold + " dB";
             }
-        });
+            if (s.minDuration !== undefined) {
+                dom.minDuration.value = s.minDuration;
+                dom.durationValue.textContent = parseFloat(s.minDuration).toFixed(1) + "s";
+            }
+            if (s.padding !== undefined) {
+                dom.padding.value = s.padding;
+                dom.paddingValue.textContent = s.padding + "ms";
+            }
+            if (s.cutMode) {
+                var radio = document.querySelector('input[name="cut-mode"][value="' + s.cutMode + '"]');
+                if (radio) radio.checked = true;
+            }
+        } catch (e) {}
     }
 
     // ============================================================
@@ -471,85 +452,50 @@
     function getSelectedTrackIndices() {
         var val = dom.trackSelect.value;
         if (val === "all") {
-            var indices = [];
+            var out = [];
             for (var i = 1; i < dom.trackSelect.options.length; i++) {
-                indices.push(parseInt(dom.trackSelect.options[i].value));
+                out.push(parseInt(dom.trackSelect.options[i].value));
             }
-            // If no tracks loaded yet, default to track 0
-            return indices.length > 0 ? indices : [0];
+            return out.length ? out : [0];
         }
         return [parseInt(val)];
     }
 
-    function evalScript(script, callback) {
-        cs.evalScript(script, callback || function () { });
+    function evalScript(script, cb) {
+        cs.evalScript(script, cb || function () {});
     }
 
-    function parseResponse(response) {
-        if (!response || response === "undefined" || response === "EvalScript error.") {
-            return null;
-        }
-        try {
-            return JSON.parse(response);
-        } catch (e) {
-            return null;
-        }
+    function parseResp(resp) {
+        if (!resp || resp === "undefined" || resp === "EvalScript error.") return null;
+        try { return JSON.parse(resp); } catch (e) { return null; }
     }
 
-    function escapeForEval(str) {
-        // Escape string for passing through evalScript
-        return "'" + str.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+    function round3(n) { return Math.round(n * 1000) / 1000; }
+
+    function formatDuration(sec) {
+        if (sec < 60) return sec.toFixed(1) + "s";
+        return Math.floor(sec / 60) + "m " + Math.round(sec % 60) + "s";
     }
 
-    function getPathSep() {
-        return navigator.platform.indexOf("Win") !== -1 ? "\\" : "/";
-    }
-
-    function getNodePath() {
-        // CEP bundles Node.js - find the executable
-        if (navigator.platform.indexOf("Win") !== -1) {
-            return "node";
-        }
-        return "/usr/local/bin/node";
-    }
-
-    function formatDuration(seconds) {
-        if (seconds < 60) {
-            return seconds.toFixed(1) + "s";
-        }
-        var mins = Math.floor(seconds / 60);
-        var secs = Math.round(seconds % 60);
-        return mins + "m " + secs + "s";
-    }
-
-    // UI helpers
     function showStatus(msg, type) {
         dom.statusBar.className = "status-bar" + (type ? " " + type : "");
         dom.statusText.textContent = msg;
         dom.statusBar.classList.remove("hidden");
     }
 
-    function hideStatus() {
-        dom.statusBar.classList.add("hidden");
-    }
+    function hideStatus() { dom.statusBar.classList.add("hidden"); }
 
-    function showProgress(text) {
+    function showProgress(text, pct) {
         dom.progressContainer.classList.remove("hidden");
-        dom.progressText.textContent = text || "Processing...";
-        dom.progressFill.style.width = "0%";
+        dom.progressText.textContent = text;
+        if (pct !== undefined) dom.progressFill.style.width = pct + "%";
     }
 
-    function setProgress(pct) {
-        dom.progressFill.style.width = Math.min(pct, 100) + "%";
-    }
+    function setProgress(pct) { dom.progressFill.style.width = pct + "%"; }
 
-    function hideProgress() {
-        dom.progressContainer.classList.add("hidden");
-    }
+    function hideProgress() { dom.progressContainer.classList.add("hidden"); }
 
-    function hideResults() {
-        dom.results.classList.add("hidden");
-    }
+    function hideResults() { dom.results.classList.add("hidden"); }
 
     // ============================================================
     // STARTUP
