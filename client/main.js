@@ -8,7 +8,65 @@
 
     var cs = new CSInterface();
     var analysisResults = null;
-    var lastLoadedClips = null; // cached clip list for auto-detect reuse
+    var lastLoadedClips = null;
+
+    // ============================================================
+    // IN-PANEL DEBUG CONSOLE
+    // ============================================================
+
+    var _logEl = null;
+    var _earlyLogs = [];
+
+    function dbg(type, msg) {
+        var line = "[" + type.toUpperCase() + "] " + msg;
+        if (_logEl) {
+            var div = document.createElement("div");
+            div.className = "log-line log-" + type;
+            div.textContent = line;
+            _logEl.appendChild(div);
+            _logEl.scrollTop = _logEl.scrollHeight;
+        } else {
+            _earlyLogs.push({ type: type, msg: line });
+        }
+    }
+
+    // Intercept native console so everything flows into the panel
+    var _origLog   = console.log.bind(console);
+    var _origWarn  = console.warn.bind(console);
+    var _origError = console.error.bind(console);
+
+    console.log   = function () { var m = Array.prototype.join.call(arguments, " "); _origLog(m);   dbg("info",  m); };
+    console.warn  = function () { var m = Array.prototype.join.call(arguments, " "); _origWarn(m);  dbg("warn",  m); };
+    console.error = function () { var m = Array.prototype.join.call(arguments, " "); _origError(m); dbg("error", m); };
+
+    function initDebugPanel() {
+        _logEl = document.getElementById("debug-log");
+
+        // Flush early logs
+        for (var i = 0; i < _earlyLogs.length; i++) {
+            var e = _earlyLogs[i];
+            var div = document.createElement("div");
+            div.className = "log-line log-" + e.type;
+            div.textContent = e.msg;
+            _logEl.appendChild(div);
+        }
+        _earlyLogs = [];
+
+        document.getElementById("btn-toggle-log").addEventListener("click", function () {
+            var panel = document.getElementById("debug-panel");
+            panel.classList.toggle("hidden");
+        });
+
+        document.getElementById("btn-clear-log").addEventListener("click", function () {
+            _logEl.innerHTML = "";
+        });
+
+        // Log system info immediately
+        console.log("DeadAir v1.0.1 ready");
+        console.log("Platform: " + navigator.platform);
+        console.log("AudioContext: " + (typeof AudioContext !== "undefined" ? "yes" : typeof webkitAudioContext !== "undefined" ? "webkit" : "MISSING"));
+        console.log("XHR: " + (typeof XMLHttpRequest !== "undefined" ? "yes" : "MISSING"));
+    }
 
     // ============================================================
     // DOM REFERENCES
@@ -46,6 +104,7 @@
     // ============================================================
 
     function init() {
+        initDebugPanel();
         bindSliders();
         bindButtons();
         loadSettings();
@@ -88,11 +147,18 @@
     // ============================================================
 
     function refreshTrackList() {
+        console.log("Fetching sequence info...");
         evalScript("getSequenceInfo()", function (resp) {
             var r = parseResp(resp);
             if (!r || !r.success) {
+                console.warn("No active sequence or evalScript error: " + resp);
                 showStatus("Open a sequence to begin.", "info");
                 return;
+            }
+            console.log("Sequence: " + r.data.name + " | Audio tracks: " + r.data.audioTracks.length);
+            for (var i = 0; i < r.data.audioTracks.length; i++) {
+                var t = r.data.audioTracks[i];
+                console.log("  Track " + t.index + ": " + t.name + " (" + t.clipCount + " clips)");
             }
             hideStatus();
             var sel = dom.trackSelect;
@@ -104,7 +170,7 @@
                 opt.textContent = t.name + " (" + t.clipCount + " clips)";
                 sel.appendChild(opt);
             }
-            lastLoadedClips = null; // reset cache when tracks change
+            lastLoadedClips = null;
         });
     }
 
@@ -113,18 +179,26 @@
     // ============================================================
 
     function getClips(callback) {
-        // Use cached clips if available and track selection hasn't changed
         if (lastLoadedClips) { callback(null, lastLoadedClips); return; }
 
         var trackIndices = getSelectedTrackIndices();
+        console.log("Getting clips for tracks: " + JSON.stringify(trackIndices));
+
         evalScript('getClipMediaPaths(' + JSON.stringify(JSON.stringify(trackIndices)) + ')', function (resp) {
             var r = parseResp(resp);
             if (!r || !r.success) {
+                console.error("getClipMediaPaths failed: " + resp);
                 callback("Failed to get clip info: " + (r ? r.error : "ExtendScript error")); return;
+            }
+            console.log("Total clips returned: " + r.data.length);
+            for (var i = 0; i < r.data.length; i++) {
+                var c = r.data[i];
+                console.log("  [" + i + "] " + c.name + " | path=" + (c.mediaPath || "(none)") + " | in=" + c.inPointSeconds.toFixed(2) + " out=" + c.outPointSeconds.toFixed(2));
             }
             var clips = r.data.filter(function (c) { return c.mediaPath && c.mediaPath.length > 0; });
             if (clips.length === 0) {
-                callback("No clips with media found on selected tracks."); return;
+                console.error("No clips with media paths. All " + r.data.length + " clips have empty paths.");
+                callback("No clips with media found. Clips may be offline or video-only."); return;
             }
             lastLoadedClips = clips;
             callback(null, clips);
@@ -330,12 +404,15 @@
     // ============================================================
 
     function loadAudioBuffer(clip, callback) {
-        // Build file:// URL
         var rawPath = clip.mediaPath;
-        // Normalize Windows backslashes, ensure leading slash for drive letters
         var urlPath = rawPath.replace(/\\/g, "/");
         if (urlPath.charAt(0) !== "/") urlPath = "/" + urlPath;
         var fileUrl = "file://" + urlPath;
+
+        console.log("Loading: " + clip.name);
+        console.log("  Path: " + rawPath);
+        console.log("  URL:  " + fileUrl);
+        console.log("  In=" + clip.inPointSeconds.toFixed(2) + "s Out=" + clip.outPointSeconds.toFixed(2) + "s Timeline=" + clip.startSeconds.toFixed(2) + "-" + clip.endSeconds.toFixed(2) + "s");
 
         var xhr = new XMLHttpRequest();
         xhr.open("GET", fileUrl, true);
@@ -343,36 +420,44 @@
         xhr.timeout = 30000;
 
         xhr.ontimeout = function () {
+            console.error("TIMEOUT: " + clip.name);
             callback("Timeout loading: " + clip.name);
         };
 
         xhr.onerror = function () {
-            callback("Network error loading: " + clip.name + " (" + fileUrl + ")");
+            console.error("XHR ERROR: " + clip.name + " status=" + xhr.status);
+            callback("Cannot read file: " + rawPath + "\n  (Try: --allow-file-access-from-files may need Premiere restart)");
         };
 
         xhr.onload = function () {
+            console.log("  XHR status=" + xhr.status + " bytes=" + (xhr.response ? xhr.response.byteLength : 0));
+
             if (!xhr.response || xhr.response.byteLength === 0) {
-                callback("Empty response for: " + clip.name);
+                console.error("  Empty response — file may be inaccessible or video-only");
+                callback("Empty response for: " + clip.name + " — is it a video clip with no audio track?");
                 return;
             }
 
             var AudioCtx = window.AudioContext || window.webkitAudioContext;
             if (!AudioCtx) {
+                console.error("  Web Audio API missing");
                 callback("Web Audio API not available in this CEP version.");
                 return;
             }
             var ctx = new AudioCtx();
+            console.log("  Decoding " + (xhr.response.byteLength / 1024).toFixed(0) + "KB...");
 
             ctx.decodeAudioData(
                 xhr.response,
                 function (buffer) {
                     ctx.close();
+                    console.log("  Decoded OK: " + buffer.numberOfChannels + "ch " + buffer.sampleRate + "Hz " + buffer.duration.toFixed(1) + "s");
                     callback(null, buffer, clip);
                 },
                 function (decodeErr) {
                     ctx.close();
-                    var msg = "Cannot decode audio for: " + clip.name;
-                    if (decodeErr && decodeErr.message) msg += " — " + decodeErr.message;
+                    var msg = "Decode failed for " + clip.name + ": " + (decodeErr ? decodeErr.message || String(decodeErr) : "unknown codec");
+                    console.error("  " + msg);
                     callback(msg);
                 }
             );

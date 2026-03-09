@@ -114,7 +114,17 @@
         <!-- Footer -->
         <div class="footer">
             <button id="btn-clear-markers" class="btn-link" title="Remove all DeadAir markers">Clear Markers</button>
+            <button id="btn-toggle-log" class="btn-link">Debug Log</button>
             <span class="version">v1.0.1</span>
+        </div>
+
+        <!-- Debug Console -->
+        <div id="debug-panel" class="debug-panel hidden">
+            <div class="debug-header">
+                <span>Console</span>
+                <button id="btn-clear-log" class="btn-link">Clear</button>
+            </div>
+            <div id="debug-log" class="debug-log"></div>
         </div>
     </div>
 
