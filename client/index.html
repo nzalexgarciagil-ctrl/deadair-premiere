@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeadAir - Silence Remover</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <div class="header">
+            <h1>DEADAIR</h1>
+            <span class="subtitle">Silence Remover</span>
+        </div>
+
+        <!-- Status Bar -->
+        <div id="status-bar" class="status-bar hidden">
+            <span id="status-text"></span>
+        </div>
+
+        <!-- Settings -->
+        <div class="settings">
+            <div class="setting-group">
+                <div class="setting-row">
+                    <label>Silence Threshold</label>
+                    <span class="value" id="threshold-value">-35 dB</span>
+                </div>
+                <input type="range" id="threshold" min="-60" max="-20" value="-35" step="1">
+            </div>
+
+            <div class="setting-group">
+                <div class="setting-row">
+                    <label>Min Silence Duration</label>
+                    <span class="value" id="duration-value">0.8s</span>
+                </div>
+                <input type="range" id="min-duration" min="0.3" max="5.0" value="0.8" step="0.1">
+            </div>
+
+            <div class="setting-group">
+                <div class="setting-row">
+                    <label>Padding</label>
+                    <span class="value" id="padding-value">100ms</span>
+                </div>
+                <input type="range" id="padding" min="0" max="500" value="100" step="10">
+            </div>
+
+            <div class="setting-group">
+                <div class="setting-row">
+                    <label>Analyze Track</label>
+                </div>
+                <select id="track-select">
+                    <option value="all">All Audio Tracks</option>
+                </select>
+            </div>
+
+            <div class="setting-group">
+                <div class="setting-row">
+                    <label>Cut Mode</label>
+                </div>
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="cut-mode" value="ripple" checked>
+                        <span class="radio-custom"></span>
+                        Ripple Delete
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="cut-mode" value="disable">
+                        <span class="radio-custom"></span>
+                        Disable Clips
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="cut-mode" value="markers">
+                        <span class="radio-custom"></span>
+                        Markers Only
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div id="progress-container" class="hidden">
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <span id="progress-text" class="progress-text">Analyzing...</span>
+        </div>
+
+        <!-- Results -->
+        <div id="results" class="results hidden">
+            <div class="results-info">
+                <span id="region-count">0 regions</span>
+                <span class="separator">|</span>
+                <span id="total-silence">0s total</span>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="actions">
+            <button id="btn-analyze" class="btn btn-primary">Analyze Silence</button>
+            <div id="confirm-actions" class="hidden">
+                <button id="btn-execute" class="btn btn-accent">Remove Silence</button>
+                <button id="btn-cancel" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <button id="btn-clear-markers" class="btn-link" title="Remove all DeadAir markers">Clear Markers</button>
+            <span class="version">v1.0.0</span>
+        </div>
+    </div>
+
+    <!-- CSInterface library -->
+    <script src="CSInterface.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

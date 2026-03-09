@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release ZIP
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          ZIP_NAME="deadair-premiere-${VERSION}.zip"
+          zip -r "$ZIP_NAME" . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x "*.zip"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            1. Download `${{ env.ZIP_NAME }}` below
+            2. Extract to your CEP extensions folder:
+               - **Windows:** `%APPDATA%\Adobe\CEP\extensions\com.deadair.silenceremover\`
+               - **macOS:** `~/Library/Application Support/Adobe/CEP/extensions/com.deadair.silenceremover/`
+            3. Enable unsigned extensions (see README)
+            4. Restart Premiere Pro
+            5. Window > Extensions > DeadAir - Silence Remover
+
+            **Requires:** FFmpeg installed and in PATH

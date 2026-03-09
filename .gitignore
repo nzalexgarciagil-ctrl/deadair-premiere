@@ -1,0 +1,7 @@
+node_modules/
+settings.json
+*.zip
+.DS_Store
+Thumbs.db
+bin/ffmpeg
+bin/ffmpeg.exe

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionManifest Version="12.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <ExtensionList>
+    <Extension Id="com.deadair.silenceremover" Version="1.0.0"/>
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <Host Name="PPRO" Version="[13.0,99.9]"/>
+    </HostList>
+    <LocaleList>
+      <Locale Code="All"/>
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="12.0"/>
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.deadair.silenceremover">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./client/index.html</MainPath>
+          <ScriptPath>./host/deadair.jsx</ScriptPath>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>DeadAir - Silence Remover</Menu>
+          <Geometry>
+            <Size>
+              <Height>520</Height>
+              <Width>320</Width>
+            </Size>
+            <MinSize>
+              <Height>400</Height>
+              <Width>280</Width>
+            </MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>

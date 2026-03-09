@@ -1,0 +1,10 @@
+{
+  "name": "deadair-analyzer",
+  "version": "1.0.0",
+  "description": "Audio silence detection engine for DeadAir Premiere Pro extension",
+  "main": "analyze.js",
+  "license": "MIT",
+  "bin": {
+    "deadair-analyze": "./analyze.js"
+  }
+}
