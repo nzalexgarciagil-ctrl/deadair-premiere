@@ -87,6 +87,12 @@ body {
     color: var(--success);
 }
 
+.status-bar.info {
+    background: rgba(212, 160, 23, 0.08);
+    border-color: var(--border);
+    color: var(--text-secondary);
+}
+
 /* Settings */
 .settings {
     display: flex;
@@ -112,6 +118,12 @@ body {
     font-weight: 500;
 }
 
+.row-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .value {
     font-size: 11px;
     color: var(--accent);
@@ -119,6 +131,41 @@ body {
     font-variant-numeric: tabular-nums;
     min-width: 50px;
     text-align: right;
+}
+
+.btn-auto {
+    background: none;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 7px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.btn-auto:hover:not(:disabled) {
+    background: var(--accent);
+    color: #1a1a1a;
+}
+
+.btn-auto:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Noise floor hint row */
+.noise-hint {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3px;
+}
+
+.noise-hint span {
+    font-size: 10px;
+    color: var(--text-muted);
 }
 
 /* Range Sliders */

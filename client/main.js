@@ -1,6 +1,6 @@
 /**
  * DeadAir - Silence Remover for Adobe Premiere Pro
- * Frontend controller — uses Web Audio API for analysis, no FFmpeg required.
+ * Frontend controller — Web Audio API analysis, no FFmpeg required.
  */
 
 (function () {
@@ -8,32 +8,37 @@
 
     var cs = new CSInterface();
     var analysisResults = null;
+    var lastLoadedClips = null; // cached clip list for auto-detect reuse
 
     // ============================================================
     // DOM REFERENCES
     // ============================================================
 
     var dom = {
-        statusBar:       document.getElementById("status-bar"),
-        statusText:      document.getElementById("status-text"),
-        threshold:       document.getElementById("threshold"),
-        thresholdValue:  document.getElementById("threshold-value"),
-        minDuration:     document.getElementById("min-duration"),
-        durationValue:   document.getElementById("duration-value"),
-        padding:         document.getElementById("padding"),
-        paddingValue:    document.getElementById("padding-value"),
-        trackSelect:     document.getElementById("track-select"),
-        btnAnalyze:      document.getElementById("btn-analyze"),
-        btnExecute:      document.getElementById("btn-execute"),
-        btnCancel:       document.getElementById("btn-cancel"),
-        btnClearMarkers: document.getElementById("btn-clear-markers"),
-        confirmActions:  document.getElementById("confirm-actions"),
+        statusBar:        document.getElementById("status-bar"),
+        statusText:       document.getElementById("status-text"),
+        threshold:        document.getElementById("threshold"),
+        thresholdValue:   document.getElementById("threshold-value"),
+        minDuration:      document.getElementById("min-duration"),
+        durationValue:    document.getElementById("duration-value"),
+        padding:          document.getElementById("padding"),
+        paddingValue:     document.getElementById("padding-value"),
+        trackSelect:      document.getElementById("track-select"),
+        btnAnalyze:       document.getElementById("btn-analyze"),
+        btnAuto:          document.getElementById("btn-auto"),
+        btnExecute:       document.getElementById("btn-execute"),
+        btnCancel:        document.getElementById("btn-cancel"),
+        btnClearMarkers:  document.getElementById("btn-clear-markers"),
+        confirmActions:   document.getElementById("confirm-actions"),
         progressContainer: document.getElementById("progress-container"),
-        progressFill:    document.getElementById("progress-fill"),
-        progressText:    document.getElementById("progress-text"),
-        results:         document.getElementById("results"),
-        regionCount:     document.getElementById("region-count"),
-        totalSilence:    document.getElementById("total-silence")
+        progressFill:     document.getElementById("progress-fill"),
+        progressText:     document.getElementById("progress-text"),
+        results:          document.getElementById("results"),
+        regionCount:      document.getElementById("region-count"),
+        totalSilence:     document.getElementById("total-silence"),
+        noiseHint:        document.getElementById("noise-hint"),
+        noiseFloorLabel:  document.getElementById("noise-floor-label"),
+        speechLevelLabel: document.getElementById("speech-level-label")
     };
 
     // ============================================================
@@ -44,7 +49,7 @@
         bindSliders();
         bindButtons();
         loadSettings();
-        setTimeout(refreshTrackList, 500);
+        setTimeout(refreshTrackList, 600);
     }
 
     // ============================================================
@@ -72,6 +77,7 @@
 
     function bindButtons() {
         dom.btnAnalyze.addEventListener("click", startAnalysis);
+        dom.btnAuto.addEventListener("click", runAutoDetect);
         dom.btnExecute.addEventListener("click", executeRemoval);
         dom.btnCancel.addEventListener("click", cancelAnalysis);
         dom.btnClearMarkers.addEventListener("click", clearMarkers);
@@ -91,153 +97,314 @@
             hideStatus();
             var sel = dom.trackSelect;
             while (sel.options.length > 1) sel.remove(1);
-            var data = r.data;
-            for (var i = 0; i < data.audioTracks.length; i++) {
-                var t = data.audioTracks[i];
+            for (var i = 0; i < r.data.audioTracks.length; i++) {
+                var t = r.data.audioTracks[i];
                 var opt = document.createElement("option");
                 opt.value = String(t.index);
                 opt.textContent = t.name + " (" + t.clipCount + " clips)";
                 sel.appendChild(opt);
             }
+            lastLoadedClips = null; // reset cache when tracks change
         });
     }
 
     // ============================================================
-    // ANALYSIS — Web Audio API (no FFmpeg required)
+    // LOAD CLIPS FROM EXTENDSCRIPT
+    // ============================================================
+
+    function getClips(callback) {
+        // Use cached clips if available and track selection hasn't changed
+        if (lastLoadedClips) { callback(null, lastLoadedClips); return; }
+
+        var trackIndices = getSelectedTrackIndices();
+        evalScript('getClipMediaPaths(' + JSON.stringify(JSON.stringify(trackIndices)) + ')', function (resp) {
+            var r = parseResp(resp);
+            if (!r || !r.success) {
+                callback("Failed to get clip info: " + (r ? r.error : "ExtendScript error")); return;
+            }
+            var clips = r.data.filter(function (c) { return c.mediaPath && c.mediaPath.length > 0; });
+            if (clips.length === 0) {
+                callback("No clips with media found on selected tracks."); return;
+            }
+            lastLoadedClips = clips;
+            callback(null, clips);
+        });
+    }
+
+    // ============================================================
+    // AUTO-DETECT THRESHOLD
+    // ============================================================
+
+    function runAutoDetect() {
+        dom.btnAuto.disabled = true;
+        dom.btnAnalyze.disabled = true;
+        dom.noiseHint.classList.add("hidden");
+        showProgress("Loading clips for auto-detect...", 5);
+
+        getClips(function (err, clips) {
+            if (err) {
+                showStatus(err, "error");
+                hideProgress();
+                dom.btnAuto.disabled = false;
+                dom.btnAnalyze.disabled = false;
+                return;
+            }
+
+            showProgress("Scanning audio levels...", 15);
+
+            // Collect amplitude samples from all clips (up to first 60s per clip, max 3 clips)
+            var sampleClips = clips.slice(0, 3);
+            var allWindowDb = [];
+            var idx = 0;
+            var loadFails = 0;
+
+            function scanNext() {
+                if (idx >= sampleClips.length) {
+                    finishAutoDetect(allWindowDb, loadFails, clips.length);
+                    return;
+                }
+                var clip = sampleClips[idx++];
+                var pct = 15 + Math.round((idx / sampleClips.length) * 75);
+                showProgress("Scanning clip " + idx + " of " + sampleClips.length + "...", pct);
+
+                loadAudioBuffer(clip, function (err, buffer, usedClip) {
+                    if (err || !buffer) {
+                        loadFails++;
+                        scanNext();
+                        return;
+                    }
+                    var dbValues = collectWindowDb(buffer, usedClip);
+                    for (var i = 0; i < dbValues.length; i++) allWindowDb.push(dbValues[i]);
+                    scanNext();
+                });
+            }
+
+            scanNext();
+        });
+    }
+
+    /**
+     * Collect dB values for each 50ms window across the clip's in-point range.
+     * Capped at 60 seconds of analysis to keep it fast.
+     */
+    function collectWindowDb(buffer, clip) {
+        var sampleRate = buffer.sampleRate;
+        var numChannels = buffer.numberOfChannels;
+        var windowSize = Math.max(1, Math.floor(sampleRate * 0.05)); // 50ms
+        var startSample = Math.floor(clip.inPointSeconds * sampleRate);
+        var maxAnalyze = Math.floor(60 * sampleRate); // max 60s
+        var endSample = Math.min(
+            Math.floor(clip.outPointSeconds * sampleRate),
+            startSample + maxAnalyze,
+            buffer.length
+        );
+
+        var channels = [];
+        for (var c = 0; c < numChannels; c++) channels.push(buffer.getChannelData(c));
+
+        var dbValues = [];
+        for (var i = startSample; i < endSample; i += windowSize) {
+            var maxAmp = 0;
+            var wEnd = Math.min(i + windowSize, endSample);
+            for (var j = i; j < wEnd; j++) {
+                for (var c = 0; c < channels.length; c++) {
+                    var v = Math.abs(channels[c][j]);
+                    if (v > maxAmp) maxAmp = v;
+                }
+            }
+            // Convert to dB, floor at -80
+            var db = maxAmp > 0 ? 20 * Math.log10(maxAmp) : -80;
+            if (db < -80) db = -80;
+            dbValues.push(db);
+        }
+        return dbValues;
+    }
+
+    /**
+     * Use the collected dB histogram to estimate a smart threshold.
+     * Algorithm:
+     *   1. Sort all values
+     *   2. Find the noise floor (5th percentile = mostly quiet)
+     *   3. Find the speech level (70th percentile = typical vocal content)
+     *   4. Threshold = noise_floor + 30% of the gap toward speech
+     *   5. Clamp to -55dB .. -15dB
+     */
+    function finishAutoDetect(allDb, loadFails, totalClips) {
+        hideProgress();
+        dom.btnAuto.disabled = false;
+        dom.btnAnalyze.disabled = false;
+
+        if (allDb.length === 0) {
+            showStatus("Auto-detect failed — could not load audio. Check console for details.", "error");
+            return;
+        }
+
+        allDb.sort(function (a, b) { return a - b; });
+
+        var noiseFloor  = allDb[Math.floor(allDb.length * 0.05)];  // 5th pct
+        var speechLevel = allDb[Math.floor(allDb.length * 0.70)];  // 70th pct
+        var gap = speechLevel - noiseFloor;
+
+        // Threshold sits 30% up from the noise floor toward speech
+        var suggestedDb = noiseFloor + gap * 0.30;
+        suggestedDb = Math.max(-55, Math.min(-15, suggestedDb));
+        var rounded = Math.round(suggestedDb);
+
+        // Update slider
+        dom.threshold.value = rounded;
+        dom.thresholdValue.textContent = rounded + " dB";
+        saveSettings();
+
+        // Show hint labels
+        dom.noiseFloorLabel.textContent  = "Floor: " + Math.round(noiseFloor) + "dB";
+        dom.speechLevelLabel.textContent = "Speech: " + Math.round(speechLevel) + "dB";
+        dom.noiseHint.classList.remove("hidden");
+
+        var msg = "Auto-set to " + rounded + " dB";
+        if (loadFails > 0) msg += " (" + loadFails + " of " + totalClips + " clips skipped — codec unsupported)";
+        showStatus(msg, "success");
+    }
+
+    // ============================================================
+    // MAIN ANALYSIS
     // ============================================================
 
     function startAnalysis() {
         analysisResults = null;
         hideResults();
         dom.btnAnalyze.disabled = true;
+        dom.btnAuto.disabled = true;
         dom.confirmActions.classList.add("hidden");
-
-        var trackIndices = getSelectedTrackIndices();
+        lastLoadedClips = null; // force fresh clip list
 
         showProgress("Getting clip info...", 5);
-        evalScript('getClipMediaPaths(' + JSON.stringify(JSON.stringify(trackIndices)) + ')', function (resp) {
-            var r = parseResp(resp);
-            if (!r || !r.success) {
-                showStatus("Failed to get clip info: " + (r ? r.error : "ExtendScript error"), "error");
-                hideProgress(); dom.btnAnalyze.disabled = false; return;
-            }
 
-            var clips = r.data.filter(function (c) { return c.mediaPath && c.mediaPath.length > 0; });
-            if (clips.length === 0) {
-                showStatus("No clips with media found on selected tracks.", "error");
-                hideProgress(); dom.btnAnalyze.disabled = false; return;
+        getClips(function (err, clips) {
+            if (err) {
+                showStatus(err, "error");
+                hideProgress();
+                dom.btnAnalyze.disabled = false;
+                dom.btnAuto.disabled = false;
+                return;
             }
-
-            analyzeClipsWithWebAudio(clips);
+            analyzeClips(clips);
         });
     }
 
-    function analyzeClipsWithWebAudio(clips) {
-        var threshold = parseFloat(dom.threshold.value);
-        var minDuration = parseFloat(dom.minDuration.value);
-        var paddingSec = parseInt(dom.padding.value) / 1000;
+    function analyzeClips(clips) {
+        var thresholdLinear = Math.pow(10, parseFloat(dom.threshold.value) / 20);
+        var minDuration     = parseFloat(dom.minDuration.value);
+        var paddingSec      = parseInt(dom.padding.value) / 1000;
 
-        var thresholdLinear = Math.pow(10, threshold / 20);
         var allRegions = [];
+        var loadFails  = 0;
         var idx = 0;
 
         function processNext() {
             if (idx >= clips.length) {
-                finishAnalysis(allRegions);
+                finishAnalysis(allRegions, loadFails, clips.length);
                 return;
             }
             var clip = clips[idx++];
-            var pct = Math.round((idx / clips.length) * 85) + 5;
-            showProgress("Analyzing clip " + idx + " of " + clips.length + "...", pct);
+            var pct = 5 + Math.round((idx / clips.length) * 88);
+            showProgress("Analyzing clip " + idx + " / " + clips.length + " — " + clip.name, pct);
 
-            analyzeOneClip(clip, thresholdLinear, minDuration, paddingSec)
-                .then(function (regions) {
-                    for (var i = 0; i < regions.length; i++) allRegions.push(regions[i]);
+            loadAudioBuffer(clip, function (err, buffer, usedClip) {
+                if (err || !buffer) {
+                    console.warn("[DeadAir] Skipping clip:", clip.name, err || "no buffer");
+                    loadFails++;
                     processNext();
-                })
-                .catch(function (err) {
-                    console.warn("[DeadAir] Skipping clip (decode error):", clip.name, err.message || err);
-                    processNext(); // Skip unreadable clips, continue
-                });
+                    return;
+                }
+                var regions = findSilentRegions(buffer, usedClip, thresholdLinear, minDuration, paddingSec);
+                for (var i = 0; i < regions.length; i++) allRegions.push(regions[i]);
+                processNext();
+            });
         }
 
         processNext();
     }
 
-    /**
-     * Analyze a single clip for silence using the Web Audio API.
-     * Returns a Promise resolving to an array of {start, end} regions in timeline seconds.
-     */
-    function analyzeOneClip(clip, thresholdLinear, minDuration, padding) {
-        return new Promise(function (resolve, reject) {
-            // Build a file:// URL from the OS path
-            var fileUrl = "file:///" + clip.mediaPath.replace(/\\/g, "/").replace(/^\//, "");
+    // ============================================================
+    // LOAD AUDIO BUFFER — handles both audio and video files
+    // ============================================================
 
-            // Fetch the file as an ArrayBuffer
-            var xhr = new XMLHttpRequest();
-            xhr.open("GET", fileUrl, true);
-            xhr.responseType = "arraybuffer";
+    function loadAudioBuffer(clip, callback) {
+        // Build file:// URL
+        var rawPath = clip.mediaPath;
+        // Normalize Windows backslashes, ensure leading slash for drive letters
+        var urlPath = rawPath.replace(/\\/g, "/");
+        if (urlPath.charAt(0) !== "/") urlPath = "/" + urlPath;
+        var fileUrl = "file://" + urlPath;
 
-            xhr.onerror = function () {
-                reject(new Error("Failed to load: " + clip.mediaPath));
-            };
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", fileUrl, true);
+        xhr.responseType = "arraybuffer";
+        xhr.timeout = 30000;
 
-            xhr.onload = function () {
-                if (xhr.status !== 0 && xhr.status !== 200) {
-                    reject(new Error("HTTP " + xhr.status + " loading " + clip.mediaPath));
-                    return;
+        xhr.ontimeout = function () {
+            callback("Timeout loading: " + clip.name);
+        };
+
+        xhr.onerror = function () {
+            callback("Network error loading: " + clip.name + " (" + fileUrl + ")");
+        };
+
+        xhr.onload = function () {
+            if (!xhr.response || xhr.response.byteLength === 0) {
+                callback("Empty response for: " + clip.name);
+                return;
+            }
+
+            var AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) {
+                callback("Web Audio API not available in this CEP version.");
+                return;
+            }
+            var ctx = new AudioCtx();
+
+            ctx.decodeAudioData(
+                xhr.response,
+                function (buffer) {
+                    ctx.close();
+                    callback(null, buffer, clip);
+                },
+                function (decodeErr) {
+                    ctx.close();
+                    var msg = "Cannot decode audio for: " + clip.name;
+                    if (decodeErr && decodeErr.message) msg += " — " + decodeErr.message;
+                    callback(msg);
                 }
-                if (!xhr.response || xhr.response.byteLength === 0) {
-                    reject(new Error("Empty response for " + clip.mediaPath));
-                    return;
-                }
+            );
+        };
 
-                var AudioCtx = window.AudioContext || window.webkitAudioContext;
-                if (!AudioCtx) {
-                    reject(new Error("Web Audio API not available"));
-                    return;
-                }
-                var ctx = new AudioCtx();
-
-                ctx.decodeAudioData(
-                    xhr.response,
-                    function (buffer) {
-                        ctx.close();
-                        var regions = findSilentRegions(buffer, clip, thresholdLinear, minDuration, padding);
-                        resolve(regions);
-                    },
-                    function (err) {
-                        ctx.close();
-                        reject(new Error("Decode failed for " + clip.name + ": " + (err ? err.message : "unknown")));
-                    }
-                );
-            };
-
-            xhr.send();
-        });
+        xhr.send();
     }
 
-    /**
-     * Scan decoded AudioBuffer for silent regions.
-     * Converts source-file timestamps → timeline timestamps.
-     */
-    function findSilentRegions(buffer, clip, thresholdLinear, minDuration, padding) {
-        var sampleRate = buffer.sampleRate;
-        var numChannels = buffer.numberOfChannels;
+    // ============================================================
+    // SILENCE DETECTION
+    // ============================================================
 
-        // Only analyze the portion of the file used in the timeline (in-point to out-point)
+    function findSilentRegions(buffer, clip, thresholdLinear, minDuration, padding) {
+        var sampleRate  = buffer.sampleRate;
+        var numChannels = buffer.numberOfChannels;
+        var windowSize  = Math.max(1, Math.floor(sampleRate * 0.05)); // 50ms windows
+
+        // The portion of the source file used by this clip
         var startSample = Math.floor(clip.inPointSeconds * sampleRate);
         var endSample   = Math.floor(clip.outPointSeconds * sampleRate);
         endSample = Math.min(endSample, buffer.length);
 
-        // Build channel data references
-        var channels = [];
-        for (var c = 0; c < numChannels; c++) {
-            channels.push(buffer.getChannelData(c));
+        // Sanity check
+        if (endSample <= startSample) {
+            // Fallback: analyze entire buffer, map to timeline
+            startSample = 0;
+            endSample = Math.min(buffer.length, Math.floor(clip.durationSeconds * sampleRate));
         }
 
-        // Analyze in 50ms windows
-        var windowSize = Math.max(1, Math.floor(sampleRate * 0.05));
+        var channels = [];
+        for (var c = 0; c < numChannels; c++) channels.push(buffer.getChannelData(c));
+
         var regions = [];
         var inSilence = false;
         var silenceStart = 0;
@@ -246,19 +413,16 @@
             var maxAmp = 0;
             var wEnd = Math.min(i + windowSize, endSample);
 
-            // Find peak amplitude across all channels in this window
             for (var j = i; j < wEnd; j++) {
                 for (var c = 0; c < channels.length; c++) {
-                    var v = channels[c][j];
-                    if (v < 0) v = -v;
+                    var v = Math.abs(channels[c][j]);
                     if (v > maxAmp) maxAmp = v;
                 }
             }
 
-            // Time of this window in the SOURCE file
-            var sourceTimeSec = i / sampleRate;
-            // Convert to timeline time: offset from in-point, added to clip's timeline start
-            var timelineSec = clip.startSeconds + (sourceTimeSec - clip.inPointSeconds);
+            // Convert sample position to timeline time
+            var sourceOffset = (i - startSample) / sampleRate;
+            var timelineSec  = clip.startSeconds + sourceOffset;
 
             if (maxAmp < thresholdLinear) {
                 if (!inSilence) {
@@ -268,37 +432,39 @@
             } else {
                 if (inSilence) {
                     inSilence = false;
-                    var silenceDuration = timelineSec - silenceStart;
-                    if (silenceDuration >= minDuration) {
-                        var s = silenceStart + padding;
-                        var e = timelineSec   - padding;
-                        if (e - s > 0.05) regions.push({ start: round3(s), end: round3(e) });
+                    var dur = timelineSec - silenceStart;
+                    if (dur >= minDuration) {
+                        pushRegion(regions, silenceStart + padding, timelineSec - padding);
                     }
                 }
             }
         }
 
-        // Handle silence extending to clip end
+        // Handle silence reaching clip end
         if (inSilence) {
-            var clipEndTimeline = clip.endSeconds;
-            var silenceDuration = clipEndTimeline - silenceStart;
-            if (silenceDuration >= minDuration) {
-                var s = silenceStart + padding;
-                var e = clipEndTimeline - padding;
-                if (e - s > 0.05) regions.push({ start: round3(s), end: round3(e) });
+            var dur = clip.endSeconds - silenceStart;
+            if (dur >= minDuration) {
+                pushRegion(regions, silenceStart + padding, clip.endSeconds - padding);
             }
         }
 
         return regions;
     }
 
-    function finishAnalysis(allRegions) {
-        // Merge overlapping regions and sort
+    function pushRegion(regions, start, end) {
+        if (end - start > 0.05) {
+            regions.push({ start: round3(start), end: round3(end) });
+        }
+    }
+
+    // ============================================================
+    // FINISH ANALYSIS
+    // ============================================================
+
+    function finishAnalysis(allRegions, loadFails, totalClips) {
         var merged = mergeRegions(allRegions);
         var totalSilence = 0;
-        for (var i = 0; i < merged.length; i++) {
-            totalSilence += merged[i].end - merged[i].start;
-        }
+        for (var i = 0; i < merged.length; i++) totalSilence += merged[i].end - merged[i].start;
 
         analysisResults = { regions: merged, totalSilence: round3(totalSilence) };
         setProgress(100);
@@ -306,9 +472,29 @@
         setTimeout(function () {
             hideProgress();
             dom.btnAnalyze.disabled = false;
+            dom.btnAuto.disabled = false;
+
+            // Build status message
+            var suffix = "";
+            if (loadFails > 0 && loadFails === totalClips) {
+                // ALL clips failed — likely file access issue
+                showStatus(
+                    "Could not load any audio files. Try: Window → Preferences → Audio → ensure clips are online. " +
+                    "Video-only clips (no audio) are also skipped.",
+                    "error"
+                );
+                return;
+            }
+            if (loadFails > 0) {
+                suffix = " (" + loadFails + "/" + totalClips + " clips skipped — codec or offline)";
+            }
 
             if (merged.length === 0) {
-                showStatus("No silence detected. Try a higher threshold (less negative).", "info");
+                showStatus(
+                    "No silence found at " + dom.threshold.value + "dB" + suffix +
+                    ". Try the Auto button or raise the threshold.",
+                    "info"
+                );
                 return;
             }
 
@@ -316,8 +502,8 @@
             dom.totalSilence.textContent = formatDuration(totalSilence) + " total";
             dom.results.classList.remove("hidden");
             dom.confirmActions.classList.remove("hidden");
-            showStatus("Found " + merged.length + " silent regions. Ready to remove.", "success");
-        }, 300);
+            showStatus("Found " + merged.length + " silent regions" + suffix + ". Ready to remove.", "success");
+        }, 200);
     }
 
     function mergeRegions(regions) {
@@ -326,7 +512,7 @@
         var merged = [{ start: regions[0].start, end: regions[0].end }];
         for (var i = 1; i < regions.length; i++) {
             var last = merged[merged.length - 1];
-            if (regions[i].start <= last.end + 0.1) {
+            if (regions[i].start <= last.end + 0.05) {
                 if (regions[i].end > last.end) last.end = regions[i].end;
             } else {
                 merged.push({ start: regions[i].start, end: regions[i].end });
@@ -341,39 +527,36 @@
 
     function executeRemoval() {
         if (!analysisResults || !analysisResults.regions.length) {
-            showStatus("No results. Run analysis first.", "error");
-            return;
+            showStatus("No results. Run analysis first.", "error"); return;
         }
 
-        var mode         = document.querySelector('input[name="cut-mode"]:checked').value;
+        var mode        = document.querySelector('input[name="cut-mode"]:checked').value;
         var trackIndices = getSelectedTrackIndices();
-        var regionsStr   = JSON.stringify(analysisResults.regions);
-        var tracksStr    = JSON.stringify(trackIndices);
+        var esc = function (s) { return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"; };
+        var regionsStr  = JSON.stringify(analysisResults.regions);
+        var tracksStr   = JSON.stringify(trackIndices);
 
         dom.btnExecute.disabled = true;
         dom.btnCancel.disabled  = true;
         showStatus("Applying to timeline...", "info");
 
-        var esc = function (s) { return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"; };
-
-        var scriptCall;
+        var call;
         if (mode === "markers") {
-            scriptCall = "addSilenceMarkers(" + esc(regionsStr) + ")";
+            call = "addSilenceMarkers(" + esc(regionsStr) + ")";
         } else if (mode === "disable") {
-            scriptCall = "disableSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
+            call = "disableSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
         } else {
-            scriptCall = "rippleDeleteSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
+            call = "rippleDeleteSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
         }
 
-        evalScript(scriptCall, function (resp) {
+        evalScript(call, function (resp) {
             dom.btnExecute.disabled = false;
             dom.btnCancel.disabled  = false;
-
             var r = parseResp(resp);
             if (r && r.success) {
                 var count = r.data.markersAdded || r.data.disabledCount || r.data.deletedCount || 0;
-                var verb  = mode === "markers" ? "markers added" : mode === "disable" ? "clips disabled" : "regions deleted";
-                showStatus(count + " " + verb + ". Press Ctrl+Z to undo.", "success");
+                var label = mode === "markers" ? "markers" : mode === "disable" ? "clips disabled" : "regions deleted";
+                showStatus(count + " " + label + ". Ctrl+Z to undo.", "success");
                 cancelAnalysis();
             } else {
                 showStatus("Error: " + (r ? r.error : "Unknown"), "error");
@@ -406,18 +589,14 @@
     // SETTINGS
     // ============================================================
 
-    function getSettings() {
-        return {
-            threshold:   dom.threshold.value,
-            minDuration: dom.minDuration.value,
-            padding:     dom.padding.value,
-            cutMode:     document.querySelector('input[name="cut-mode"]:checked').value
-        };
-    }
-
     function saveSettings() {
         try {
-            localStorage.setItem("deadair_settings", JSON.stringify(getSettings()));
+            localStorage.setItem("deadair_settings", JSON.stringify({
+                threshold:   dom.threshold.value,
+                minDuration: dom.minDuration.value,
+                padding:     dom.padding.value,
+                cutMode:     document.querySelector('input[name="cut-mode"]:checked').value
+            }));
         } catch (e) {}
     }
 
@@ -426,18 +605,9 @@
             var raw = localStorage.getItem("deadair_settings");
             if (!raw) return;
             var s = JSON.parse(raw);
-            if (s.threshold !== undefined) {
-                dom.threshold.value = s.threshold;
-                dom.thresholdValue.textContent = s.threshold + " dB";
-            }
-            if (s.minDuration !== undefined) {
-                dom.minDuration.value = s.minDuration;
-                dom.durationValue.textContent = parseFloat(s.minDuration).toFixed(1) + "s";
-            }
-            if (s.padding !== undefined) {
-                dom.padding.value = s.padding;
-                dom.paddingValue.textContent = s.padding + "ms";
-            }
+            if (s.threshold)   { dom.threshold.value = s.threshold; dom.thresholdValue.textContent = s.threshold + " dB"; }
+            if (s.minDuration) { dom.minDuration.value = s.minDuration; dom.durationValue.textContent = parseFloat(s.minDuration).toFixed(1) + "s"; }
+            if (s.padding)     { dom.padding.value = s.padding; dom.paddingValue.textContent = s.padding + "ms"; }
             if (s.cutMode) {
                 var radio = document.querySelector('input[name="cut-mode"][value="' + s.cutMode + '"]');
                 if (radio) radio.checked = true;
@@ -453,17 +623,13 @@
         var val = dom.trackSelect.value;
         if (val === "all") {
             var out = [];
-            for (var i = 1; i < dom.trackSelect.options.length; i++) {
-                out.push(parseInt(dom.trackSelect.options[i].value));
-            }
+            for (var i = 1; i < dom.trackSelect.options.length; i++) out.push(parseInt(dom.trackSelect.options[i].value));
             return out.length ? out : [0];
         }
         return [parseInt(val)];
     }
 
-    function evalScript(script, cb) {
-        cs.evalScript(script, cb || function () {});
-    }
+    function evalScript(script, cb) { cs.evalScript(script, cb || function () {}); }
 
     function parseResp(resp) {
         if (!resp || resp === "undefined" || resp === "EvalScript error.") return null;
@@ -483,22 +649,18 @@
         dom.statusBar.classList.remove("hidden");
     }
 
-    function hideStatus() { dom.statusBar.classList.add("hidden"); }
-
+    function hideStatus()   { dom.statusBar.classList.add("hidden"); }
     function showProgress(text, pct) {
         dom.progressContainer.classList.remove("hidden");
         dom.progressText.textContent = text;
         if (pct !== undefined) dom.progressFill.style.width = pct + "%";
     }
-
     function setProgress(pct) { dom.progressFill.style.width = pct + "%"; }
-
-    function hideProgress() { dom.progressContainer.classList.add("hidden"); }
-
-    function hideResults() { dom.results.classList.add("hidden"); }
+    function hideProgress()  { dom.progressContainer.classList.add("hidden"); }
+    function hideResults()   { dom.results.classList.add("hidden"); }
 
     // ============================================================
-    // STARTUP
+    // START
     // ============================================================
 
     init();
