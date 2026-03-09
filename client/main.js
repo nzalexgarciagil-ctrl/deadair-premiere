@@ -672,19 +672,21 @@
     function findSilentRegions(buffer, clip, thresholdLinear, minDuration, padding) {
         var sampleRate  = buffer.sampleRate;
         var numChannels = buffer.numberOfChannels;
-        var windowSize  = Math.max(1, Math.floor(sampleRate * 0.05)); // 50ms windows
+        var windowSize  = Math.max(1, Math.floor(sampleRate * 0.05)); // 50ms
 
-        // The portion of the source file used by this clip
         var startSample = Math.floor(clip.inPointSeconds * sampleRate);
         var endSample   = Math.floor(clip.outPointSeconds * sampleRate);
         endSample = Math.min(endSample, buffer.length);
 
-        // Sanity check
-        if (endSample <= startSample) {
-            // Fallback: analyze entire buffer, map to timeline
+        // Fallback: use full buffer if in/out points look wrong
+        if (endSample <= startSample || endSample === 0) {
+            console.warn("  in/out samples invalid — using full buffer");
             startSample = 0;
-            endSample = Math.min(buffer.length, Math.floor(clip.durationSeconds * sampleRate));
+            endSample = buffer.length;
         }
+
+        console.log("  Scanning " + ((endSample - startSample) / sampleRate).toFixed(1) + "s (" + (endSample - startSample) + " samples, window=" + windowSize + ")");
+        console.log("  Threshold linear=" + thresholdLinear.toFixed(4) + " (" + (20 * Math.log10(thresholdLinear)).toFixed(1) + "dB), minDur=" + minDuration + "s");
 
         var channels = [];
         for (var c = 0; c < numChannels; c++) channels.push(buffer.getChannelData(c));
@@ -692,6 +694,11 @@
         var regions = [];
         var inSilence = false;
         var silenceStart = 0;
+        var totalWindows = 0;
+        var silentWindows = 0;
+        var globalMax = 0;
+        var globalMin = Infinity;
+        var preFilterRegions = 0;
 
         for (var i = startSample; i < endSample; i += windowSize) {
             var maxAmp = 0;
@@ -704,11 +711,15 @@
                 }
             }
 
-            // Convert sample position to timeline time
+            totalWindows++;
+            if (maxAmp > globalMax) globalMax = maxAmp;
+            if (maxAmp < globalMin) globalMin = maxAmp;
+
             var sourceOffset = (i - startSample) / sampleRate;
             var timelineSec  = clip.startSeconds + sourceOffset;
 
             if (maxAmp < thresholdLinear) {
+                silentWindows++;
                 if (!inSilence) {
                     inSilence = true;
                     silenceStart = timelineSec;
@@ -716,6 +727,7 @@
             } else {
                 if (inSilence) {
                     inSilence = false;
+                    preFilterRegions++;
                     var dur = timelineSec - silenceStart;
                     if (dur >= minDuration) {
                         pushRegion(regions, silenceStart + padding, timelineSec - padding);
@@ -724,12 +736,25 @@
             }
         }
 
-        // Handle silence reaching clip end
         if (inSilence) {
+            preFilterRegions++;
             var dur = clip.endSeconds - silenceStart;
             if (dur >= minDuration) {
                 pushRegion(regions, silenceStart + padding, clip.endSeconds - padding);
             }
+        }
+
+        var maxDb = globalMax > 0 ? (20 * Math.log10(globalMax)).toFixed(1) : "-inf";
+        var minDb = globalMin < Infinity && globalMin > 0 ? (20 * Math.log10(globalMin)).toFixed(1) : "-inf";
+        console.log("  Peak amp: " + globalMax.toFixed(4) + " (" + maxDb + "dB)  Floor: " + globalMin.toFixed(6) + " (" + minDb + "dB)");
+        console.log("  Windows: " + totalWindows + " total, " + silentWindows + " silent (" + ((silentWindows/totalWindows)*100).toFixed(0) + "%)");
+        console.log("  Regions before minDur filter: " + preFilterRegions + "  After: " + regions.length);
+
+        if (regions.length === 0 && silentWindows === 0) {
+            console.warn("  NO silent windows at all — try a higher threshold (closer to 0dB)");
+            console.warn("  Suggested threshold: " + maxDb + "dB (peak) — try " + Math.max(-10, Math.ceil(parseFloat(maxDb) - 10)) + "dB");
+        } else if (regions.length === 0 && preFilterRegions > 0) {
+            console.warn("  Found " + preFilterRegions + " silent regions but all shorter than minDuration=" + minDuration + "s — lower minDuration");
         }
 
         return regions;
@@ -913,7 +938,26 @@
         return [parseInt(val)];
     }
 
-    function evalScript(script, cb) { cs.evalScript(script, cb || function () {}); }
+    function evalScript(script, cb) {
+        cs.evalScript(script, function (resp) {
+            // Pipe any ExtendScript logs into the debug panel
+            if (resp && resp !== "undefined" && resp !== "EvalScript error.") {
+                try {
+                    var r = JSON.parse(resp);
+                    if (r && r.logs && r.logs.length) {
+                        for (var i = 0; i < r.logs.length; i++) {
+                            var line = r.logs[i];
+                            var type = /^ERROR/.test(line) ? "error" : /^WARN/.test(line) ? "warn" : "ok";
+                            dbg(type, "[JSX] " + line);
+                        }
+                    }
+                } catch (e) {}
+            } else if (resp === "EvalScript error." || !resp) {
+                console.error("evalScript failed for: " + script.substring(0, 60));
+            }
+            if (cb) cb(resp);
+        });
+    }
 
     function parseResp(resp) {
         if (!resp || resp === "undefined" || resp === "EvalScript error.") return null;
