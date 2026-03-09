@@ -1,8 +1,10 @@
 /**
  * DeadAir - Silence Remover for Adobe Premiere Pro
- * ExtendScript backend
+ * ExtendScript backend — razor/delete logic ported from kinokit's removeTimeRanges
  * MIT License
  */
+
+var TICKS_PER_SECOND = 254016000000;
 
 // ============================================================
 // UTILITIES
@@ -33,20 +35,14 @@ function jsonStringify(obj) {
 
 function jsonParse(str) { return eval("(" + str + ")"); }
 
-// Accumulated log messages — returned with every response so JS can display them
 var _logs = [];
-
-function log(msg) {
-    _logs.push(String(msg));
-    $.writeln("[DeadAir] " + msg);
-}
+function log(msg) { _logs.push(String(msg)); $.writeln("[DeadAir] " + msg); }
 
 function result(data) {
     var out = jsonStringify({ success: true, data: data, logs: _logs });
     _logs = [];
     return out;
 }
-
 function error(msg) {
     log("ERROR: " + msg);
     var out = jsonStringify({ success: false, error: String(msg), logs: _logs });
@@ -54,66 +50,50 @@ function error(msg) {
     return out;
 }
 
-// ============================================================
-// RAZOR HELPER — tries multiple approaches for cross-version compat
-// ============================================================
-
-function makeTime(seconds) {
-    var t = new Time();
-    t.seconds = parseFloat(seconds);
-    return t;
+function secondsToTicks(secs) {
+    return String(Math.round(parseFloat(secs) * TICKS_PER_SECOND));
 }
 
-function razorAt(seq, timeSec) {
-    // Try 1: sequence-level razor with Time object
-    try {
-        var t = makeTime(timeSec);
-        seq.razor(t.ticks);
-        return "seq.razor(ticks)";
-    } catch (e1) {}
+function getSeconds(timeObj) {
+    if (!timeObj) return 0;
+    if (typeof timeObj.seconds === "number" && !isNaN(timeObj.seconds)) return timeObj.seconds;
+    if (timeObj.ticks !== undefined) return parseFloat(timeObj.ticks) / TICKS_PER_SECOND;
+    return 0;
+}
 
-    // Try 2: sequence razor with seconds float
-    try {
-        seq.razor(timeSec);
-        return "seq.razor(sec)";
-    } catch (e2) {}
+function secsToTC(totalSecs, fps) {
+    totalSecs = parseFloat(totalSecs);
+    if (isNaN(totalSecs) || totalSecs < 0) totalSecs = 0;
+    var h = Math.floor(totalSecs / 3600);
+    var m = Math.floor((totalSecs % 3600) / 60);
+    var s = Math.floor(totalSecs % 60);
+    var f = Math.floor((totalSecs - Math.floor(totalSecs)) * fps);
+    if (f >= fps) f = Math.floor(fps) - 1;
+    function p(n) { return n < 10 ? "0" + n : "" + n; }
+    return p(h) + ":" + p(m) + ":" + p(s) + ":" + p(f);
+}
 
-    // Try 3: QE DOM razor
+function countClips(seq) {
+    var n = 0;
+    for (var i = 0; i < seq.videoTracks.numTracks; i++) n += seq.videoTracks[i].clips.numItems;
+    for (var j = 0; j < seq.audioTracks.numTracks; j++) n += seq.audioTracks[j].clips.numItems;
+    return n;
+}
+
+function getFps(seq) {
+    var fps = 24;
     try {
-        app.enableQE();
-        var qeSeq = qe.project.getActiveSequence();
-        if (qeSeq) {
-            var t2 = makeTime(timeSec);
-            qeSeq.razor(t2.ticks);
-            return "qe.razor(ticks)";
+        if (seq.videoFrameRate && seq.videoFrameRate.ticks) {
+            var tpf = parseInt(seq.videoFrameRate.ticks, 10);
+            if (tpf > 0) fps = Math.round(TICKS_PER_SECOND / tpf * 100) / 100;
         }
-    } catch (e3) {}
-
-    return null; // all failed
-}
-
-function trackRazorAt(track, timeSec) {
-    // Try 1: Time object ticks
-    try {
-        var t = makeTime(timeSec);
-        track.razor(t.ticks);
-        return "track.razor(ticks)";
-    } catch (e1) {}
-
-    // Try 2: plain seconds float
-    try {
-        track.razor(timeSec);
-        return "track.razor(sec)";
-    } catch (e2) {}
-
-    // Try 3: Time object directly
-    try {
-        var t3 = makeTime(timeSec);
-        track.razor(t3);
-        return "track.razor(Time)";
-    } catch (e3) {}
-
-    return null;
+        if (isNaN(fps) || fps <= 0) {
+            var tb = parseInt(seq.timebase, 10);
+            if (tb > 0) fps = Math.round(TICKS_PER_SECOND / tb * 100) / 100;
+        }
+    } catch (e) {}
+    if (isNaN(fps) || fps <= 0) fps = 24;
+    return fps;
 }
 
 // ============================================================
@@ -123,28 +103,19 @@ function trackRazorAt(track, timeSec) {
 function getSequenceInfo() {
     try {
         var seq = app.project.activeSequence;
-        if (!seq) return error("No active sequence. Open a sequence first.");
-
+        if (!seq) return error("No active sequence.");
         var audioTracks = [];
         for (var i = 0; i < seq.audioTracks.numTracks; i++) {
             var t = seq.audioTracks[i];
-            var n = 0;
-            for (var j = 0; j < t.clips.numItems; j++) n++;
-            audioTracks.push({ index: i, name: t.name, clipCount: n });
+            audioTracks.push({ index: i, name: t.name, clipCount: t.clips.numItems });
         }
-
         var videoTracks = [];
         for (var i = 0; i < seq.videoTracks.numTracks; i++) {
             var t = seq.videoTracks[i];
-            var n = 0;
-            for (var j = 0; j < t.clips.numItems; j++) n++;
-            videoTracks.push({ index: i, name: t.name, clipCount: n });
+            videoTracks.push({ index: i, name: t.name, clipCount: t.clips.numItems });
         }
-
         return result({ name: seq.name, audioTracks: audioTracks, videoTracks: videoTracks });
-    } catch (e) {
-        return error("getSequenceInfo: " + e.toString());
-    }
+    } catch (e) { return error("getSequenceInfo: " + e.toString()); }
 }
 
 // ============================================================
@@ -155,41 +126,30 @@ function getClipMediaPaths(trackIndicesStr) {
     try {
         var seq = app.project.activeSequence;
         if (!seq) return error("No active sequence.");
-
         var trackIndices = jsonParse(trackIndicesStr);
         var clips = [];
-
         for (var t = 0; t < trackIndices.length; t++) {
-            var trackIdx = trackIndices[t];
-            if (trackIdx < 0 || trackIdx >= seq.audioTracks.numTracks) continue;
-            var track = seq.audioTracks[trackIdx];
-
+            var tidx = trackIndices[t];
+            if (tidx < 0 || tidx >= seq.audioTracks.numTracks) continue;
+            var track = seq.audioTracks[tidx];
             for (var c = 0; c < track.clips.numItems; c++) {
                 var clip = track.clips[c];
                 var mediaPath = "";
-                try {
-                    if (clip.projectItem) mediaPath = clip.projectItem.getMediaPath();
-                } catch (pe) {}
-
+                try { if (clip.projectItem) mediaPath = clip.projectItem.getMediaPath(); } catch (pe) {}
                 clips.push({
-                    trackIndex: trackIdx,
-                    clipIndex: c,
-                    name: clip.name,
-                    startSeconds:   parseFloat(clip.start.seconds),
-                    endSeconds:     parseFloat(clip.end.seconds),
-                    inPointSeconds: parseFloat(clip.inPoint.seconds),
-                    outPointSeconds: parseFloat(clip.outPoint.seconds),
-                    durationSeconds: parseFloat(clip.duration.seconds),
+                    trackIndex: tidx, clipIndex: c, name: clip.name,
+                    startSeconds:    getSeconds(clip.start),
+                    endSeconds:      getSeconds(clip.end),
+                    inPointSeconds:  getSeconds(clip.inPoint),
+                    outPointSeconds: getSeconds(clip.outPoint),
+                    durationSeconds: getSeconds(clip.duration),
                     mediaPath: mediaPath
                 });
             }
         }
-
         log("Returning " + clips.length + " clips");
         return result(clips);
-    } catch (e) {
-        return error("getClipMediaPaths: " + e.toString());
-    }
+    } catch (e) { return error("getClipMediaPaths: " + e.toString()); }
 }
 
 // ============================================================
@@ -200,125 +160,35 @@ function addSilenceMarkers(regionsStr) {
     try {
         var seq = app.project.activeSequence;
         if (!seq) return error("No active sequence.");
-
         var regions = jsonParse(regionsStr);
         var count = 0;
-
         for (var i = 0; i < regions.length; i++) {
-            var region = regions[i];
             try {
-                var marker = seq.markers.createMarker(region.start);
-                marker.name = "Silence";
-                marker.comments = "Duration: " + (region.end - region.start).toFixed(2) + "s";
-                marker.setTypeAsComment();
+                var m = seq.markers.createMarker(regions[i].start);
+                m.name = "Silence";
+                m.comments = "Duration: " + (regions[i].end - regions[i].start).toFixed(2) + "s";
+                m.setTypeAsComment();
                 count++;
-            } catch (me) {
-                log("Marker " + i + " failed: " + me.toString());
-            }
+            } catch (me) { log("Marker " + i + " failed: " + me.toString()); }
         }
-
         log("Added " + count + " markers");
         return result({ markersAdded: count });
-    } catch (e) {
-        return error("addSilenceMarkers: " + e.toString());
-    }
+    } catch (e) { return error("addSilenceMarkers: " + e.toString()); }
 }
 
 // ============================================================
-// DISABLE SILENT REGIONS
+// DISABLE SILENT REGIONS (non-destructive)
 // ============================================================
 
 function disableSilentRegions(regionsStr, trackIndicesStr) {
     try {
         var seq = app.project.activeSequence;
         if (!seq) return error("No active sequence.");
-
         var regions = jsonParse(regionsStr);
         var trackIndices = jsonParse(trackIndicesStr);
-        regions.sort(function (a, b) { return b.start - a.start; });
-
-        log("Disabling " + regions.length + " regions");
-
-        // First pass: razor at all boundaries
-        var razorMethod = "";
-        for (var r = 0; r < regions.length; r++) {
-            var s = regions[r].start;
-            var e = regions[r].end;
-
-            for (var t = 0; t < trackIndices.length; t++) {
-                var tidx = trackIndices[t];
-                if (tidx >= seq.audioTracks.numTracks) continue;
-                var track = seq.audioTracks[tidx];
-                for (var c = track.clips.numItems - 1; c >= 0; c--) {
-                    var clip = track.clips[c];
-                    var cs = parseFloat(clip.start.seconds);
-                    var ce = parseFloat(clip.end.seconds);
-                    if (cs < e && ce > s) {
-                        if (s > cs + 0.001 && s < ce - 0.001) {
-                            var m = trackRazorAt(track, s);
-                            if (!razorMethod && m) razorMethod = m;
-                            if (!m) log("WARN: razor at " + s.toFixed(3) + "s failed on audio track " + tidx);
-                        }
-                        if (e > cs + 0.001 && e < ce - 0.001) {
-                            trackRazorAt(track, e);
-                        }
-                    }
-                }
-            }
-
-            for (var v = 0; v < seq.videoTracks.numTracks; v++) {
-                var vt = seq.videoTracks[v];
-                for (var vc = vt.clips.numItems - 1; vc >= 0; vc--) {
-                    var vclip = vt.clips[vc];
-                    var vcs = parseFloat(vclip.start.seconds);
-                    var vce = parseFloat(vclip.end.seconds);
-                    if (vcs < e && vce > s) {
-                        if (s > vcs + 0.001 && s < vce - 0.001) trackRazorAt(vt, s);
-                        if (e > vcs + 0.001 && e < vce - 0.001) trackRazorAt(vt, e);
-                    }
-                }
-            }
-        }
-
-        log("Razor method used: " + (razorMethod || "none needed or all failed"));
-
-        // Second pass: disable clips within silence regions
-        var disabledCount = 0;
-        for (var r = 0; r < regions.length; r++) {
-            var s = regions[r].start;
-            var e = regions[r].end;
-
-            for (var t = 0; t < trackIndices.length; t++) {
-                var tidx = trackIndices[t];
-                if (tidx >= seq.audioTracks.numTracks) continue;
-                var track = seq.audioTracks[tidx];
-                for (var c = 0; c < track.clips.numItems; c++) {
-                    var clip = track.clips[c];
-                    var cs = parseFloat(clip.start.seconds);
-                    var ce = parseFloat(clip.end.seconds);
-                    if (cs >= s - 0.01 && ce <= e + 0.01) {
-                        clip.disabled = true;
-                        disabledCount++;
-                    }
-                }
-            }
-
-            for (var v = 0; v < seq.videoTracks.numTracks; v++) {
-                var vt = seq.videoTracks[v];
-                for (var vc = 0; vc < vt.clips.numItems; vc++) {
-                    var vclip = vt.clips[vc];
-                    var vcs = parseFloat(vclip.start.seconds);
-                    var vce = parseFloat(vclip.end.seconds);
-                    if (vcs >= s - 0.01 && vce <= e + 0.01) vclip.disabled = true;
-                }
-            }
-        }
-
-        log("Disabled " + disabledCount + " clip segments");
+        var disabledCount = removeTimeRangesCore(seq, regions, trackIndices, "disable");
         return result({ disabledCount: disabledCount });
-    } catch (e) {
-        return error("disableSilentRegions: " + e.toString());
-    }
+    } catch (e) { return error("disableSilentRegions: " + e.toString()); }
 }
 
 // ============================================================
@@ -329,155 +199,264 @@ function rippleDeleteSilentRegions(regionsStr, trackIndicesStr) {
     try {
         var seq = app.project.activeSequence;
         if (!seq) return error("No active sequence.");
-
         var regions = jsonParse(regionsStr);
         var trackIndices = jsonParse(trackIndicesStr);
-
-        // Process END → START to preserve timecodes
-        regions.sort(function (a, b) { return b.start - a.start; });
-        log("Ripple deleting " + regions.length + " regions (end→start)");
-
-        // Enable QE DOM for ripple delete
-        var hasQE = false;
-        var qeSeq = null;
-        try {
-            app.enableQE();
-            qeSeq = qe.project.getActiveSequence();
-            hasQE = (qeSeq !== null && qeSeq !== undefined);
-            log("QE DOM: " + (hasQE ? "available" : "unavailable"));
-        } catch (qeErr) {
-            log("QE DOM unavailable: " + qeErr.toString());
-        }
-
-        var deletedCount = 0;
-        var razorMethod = "";
-
-        for (var r = 0; r < regions.length; r++) {
-            var startTime = regions[r].start;
-            var endTime   = regions[r].end;
-            log("Region " + r + ": " + startTime.toFixed(3) + "s → " + endTime.toFixed(3) + "s");
-
-            // --- Razor audio tracks ---
-            for (var t = 0; t < trackIndices.length; t++) {
-                var tidx = trackIndices[t];
-                if (tidx >= seq.audioTracks.numTracks) continue;
-                var track = seq.audioTracks[tidx];
-
-                for (var c = track.clips.numItems - 1; c >= 0; c--) {
-                    var clip = track.clips[c];
-                    var cs = parseFloat(clip.start.seconds);
-                    var ce = parseFloat(clip.end.seconds);
-
-                    if (cs < endTime && ce > startTime) {
-                        if (startTime > cs + 0.001 && startTime < ce - 0.001) {
-                            var m = trackRazorAt(track, startTime);
-                            if (!razorMethod) razorMethod = m || "failed";
-                            if (!m) {
-                                // Try sequence-level razor
-                                var sm = razorAt(seq, startTime);
-                                log("Track razor failed, seq razor: " + (sm || "also failed"));
-                            }
-                        }
-                        if (endTime > cs + 0.001 && endTime < ce - 0.001) {
-                            var m2 = trackRazorAt(track, endTime);
-                            if (!m2) razorAt(seq, endTime);
-                        }
-                    }
-                }
-            }
-
-            // --- Razor video tracks ---
-            for (var v = 0; v < seq.videoTracks.numTracks; v++) {
-                var vt = seq.videoTracks[v];
-                for (var vc = vt.clips.numItems - 1; vc >= 0; vc--) {
-                    var vclip = vt.clips[vc];
-                    var vcs = parseFloat(vclip.start.seconds);
-                    var vce = parseFloat(vclip.end.seconds);
-                    if (vcs < endTime && vce > startTime) {
-                        if (startTime > vcs + 0.001 && startTime < vce - 0.001) trackRazorAt(vt, startTime);
-                        if (endTime   > vcs + 0.001 && endTime   < vce - 0.001) trackRazorAt(vt, endTime);
-                    }
-                }
-            }
-
-            // --- Select clips in the silence region ---
-            for (var t = 0; t < trackIndices.length; t++) {
-                var tidx = trackIndices[t];
-                if (tidx >= seq.audioTracks.numTracks) continue;
-                var track = seq.audioTracks[tidx];
-                for (var c = 0; c < track.clips.numItems; c++) {
-                    var clip = track.clips[c];
-                    var cs = parseFloat(clip.start.seconds);
-                    var ce = parseFloat(clip.end.seconds);
-                    if (cs >= startTime - 0.01 && ce <= endTime + 0.01) {
-                        try { clip.setSelected(true, true); } catch (se) {}
-                    }
-                }
-            }
-
-            for (var v = 0; v < seq.videoTracks.numTracks; v++) {
-                var vt = seq.videoTracks[v];
-                for (var vc = 0; vc < vt.clips.numItems; vc++) {
-                    var vclip = vt.clips[vc];
-                    var vcs = parseFloat(vclip.start.seconds);
-                    var vce = parseFloat(vclip.end.seconds);
-                    if (vcs >= startTime - 0.01 && vce <= endTime + 0.01) {
-                        try { vclip.setSelected(true, true); } catch (se) {}
-                    }
-                }
-            }
-
-            // --- Ripple delete ---
-            if (hasQE && qeSeq) {
-                try {
-                    qeSeq.rippleDeleteSelection();
-                    deletedCount++;
-                    log("  QE ripple delete OK");
-                } catch (qeDelErr) {
-                    log("  QE ripple delete failed: " + qeDelErr.toString());
-                    // Fallback: remove selected clips without ripple
-                    deletedCount += removeSelected(seq, trackIndices, startTime, endTime);
-                }
-            } else {
-                deletedCount += removeSelected(seq, trackIndices, startTime, endTime);
-            }
-        }
-
-        log("Razor method: " + (razorMethod || "not needed"));
-        log("Total deleted: " + deletedCount);
+        var deletedCount = removeTimeRangesCore(seq, regions, trackIndices, "ripple");
         return result({ deletedCount: deletedCount });
-    } catch (e) {
-        return error("rippleDeleteSilentRegions: " + e.toString());
-    }
+    } catch (e) { return error("rippleDeleteSilentRegions: " + e.toString()); }
 }
 
-function removeSelected(seq, trackIndices, startTime, endTime) {
-    var n = 0;
-    for (var t = 0; t < trackIndices.length; t++) {
-        var tidx = trackIndices[t];
-        if (tidx >= seq.audioTracks.numTracks) continue;
-        var track = seq.audioTracks[tidx];
-        for (var c = track.clips.numItems - 1; c >= 0; c--) {
-            var clip = track.clips[c];
-            var cs = parseFloat(clip.start.seconds);
-            var ce = parseFloat(clip.end.seconds);
-            if (cs >= startTime - 0.01 && ce <= endTime + 0.01) {
-                try { clip.remove(true, true); n++; } catch (re) { log("remove() failed: " + re.toString()); }
+// ============================================================
+// CORE: RAZOR → DELETE → GAP CLOSE  (kinokit's proven approach)
+// ============================================================
+
+function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
+    log("removeTimeRangesCore: " + ranges.length + " ranges, mode=" + mode);
+
+    // Sort and merge overlapping ranges
+    ranges.sort(function (a, b) { return a.start - b.start; });
+    var merged = [{ start: parseFloat(ranges[0].start), end: parseFloat(ranges[0].end) }];
+    for (var mi = 1; mi < ranges.length; mi++) {
+        var last = merged[merged.length - 1];
+        var rs = parseFloat(ranges[mi].start), re = parseFloat(ranges[mi].end);
+        if (rs <= last.end + 0.02) { last.end = Math.max(last.end, re); }
+        else { merged.push({ start: rs, end: re }); }
+    }
+    log("Merged to " + merged.length + " ranges");
+
+    // ── Enable QE DOM ──────────────────────────────────────
+    app.enableQE();
+    var qeSeq = qe.project.getActiveSequence();
+    if (!qeSeq) { log("WARN: QE DOM unavailable — skipping razor"); return 0; }
+    log("QE DOM available");
+
+    var fps = getFps(seq);
+    log("FPS=" + fps);
+
+    // ── Collect all unique cut times ──────────────────────
+    var cutTimes = [];
+    for (var ci = 0; ci < merged.length; ci++) {
+        if (merged[ci].start > 0.01) cutTimes.push(merged[ci].start);
+        cutTimes.push(merged[ci].end);
+    }
+    cutTimes.sort(function (a, b) { return a - b; });
+    var unique = [cutTimes[0]];
+    for (var ui = 1; ui < cutTimes.length; ui++) {
+        if (Math.abs(cutTimes[ui] - unique[unique.length - 1]) > 0.01) unique.push(cutTimes[ui]);
+    }
+    cutTimes = unique;
+    log("Cut times: " + cutTimes.length);
+
+    // ── Discover working razor method ─────────────────────
+    // Find a test time that's inside an actual clip (not at a boundary)
+    var testTime = null, testIdx = -1;
+    for (var tti = 0; tti < cutTimes.length && testTime === null; tti++) {
+        var cand = cutTimes[tti];
+        if (cand < 0.05) continue;
+        var seqNow = app.project.activeSequence;
+        outer: for (var vt = 0; vt < seqNow.videoTracks.numTracks; vt++) {
+            var vtr = seqNow.videoTracks[vt];
+            for (var vc = 0; vc < vtr.clips.numItems; vc++) {
+                var vcl = vtr.clips[vc];
+                var vs = getSeconds(vcl.start), ve = getSeconds(vcl.end);
+                if (cand > vs + 0.05 && cand < ve - 0.05) { testTime = cand; testIdx = tti; break outer; }
+            }
+        }
+        if (testTime === null) {
+            outer2: for (var at = 0; at < seqNow.audioTracks.numTracks; at++) {
+                var atr = seqNow.audioTracks[at];
+                for (var ac = 0; ac < atr.clips.numItems; ac++) {
+                    var acl = atr.clips[ac];
+                    var as = getSeconds(acl.start), ae = getSeconds(acl.end);
+                    if (cand > as + 0.05 && cand < ae - 0.05) { testTime = cand; testIdx = tti; break outer2; }
+                }
             }
         }
     }
-    for (var v = 0; v < seq.videoTracks.numTracks; v++) {
-        var vt = seq.videoTracks[v];
-        for (var vc = vt.clips.numItems - 1; vc >= 0; vc--) {
-            var vclip = vt.clips[vc];
-            var vcs = parseFloat(vclip.start.seconds);
-            var vce = parseFloat(vclip.end.seconds);
-            if (vcs >= startTime - 0.01 && vce <= endTime + 0.01) {
-                try { vclip.remove(true, true); } catch (re) {}
-            }
+
+    if (testTime === null) {
+        log("ERROR: No cut times fall inside clips. Timeline may have shifted.");
+        return 0;
+    }
+    log("Test cut at " + testTime.toFixed(3) + "s");
+
+    var clipsBefore = countClips(app.project.activeSequence);
+    log("Clips before razor: " + clipsBefore);
+
+    // Candidates: try TC, ticks, secs on both razor and razorAt
+    var candidates = [
+        { fn: "razor",   arg: secsToTC(testTime, fps),      desc: "razor(TC)" },
+        { fn: "razor",   arg: secondsToTicks(testTime),      desc: "razor(ticks)" },
+        { fn: "razor",   arg: String(testTime),              desc: "razor(secs)" },
+        { fn: "razorAt", arg: secsToTC(testTime, fps),      desc: "razorAt(TC)" },
+        { fn: "razorAt", arg: secondsToTicks(testTime),      desc: "razorAt(ticks)" },
+        { fn: "razorAt", arg: String(testTime),              desc: "razorAt(secs)" }
+    ];
+
+    var workingMethod = null;
+    for (var cmi = 0; cmi < candidates.length; cmi++) {
+        var cm = candidates[cmi];
+        if (typeof qeSeq[cm.fn] !== "function") { log(cm.desc + ": not a function"); continue; }
+        try { qeSeq[cm.fn](cm.arg); } catch (e) { log(cm.desc + ": threw " + e); continue; }
+        var clipsNow = countClips(app.project.activeSequence);
+        if (clipsNow > clipsBefore) {
+            workingMethod = cm;
+            log(cm.desc + ": WORKS (" + clipsBefore + " -> " + clipsNow + " clips)");
+            clipsBefore = clipsNow;
+            break;
+        } else {
+            log(cm.desc + ": no effect (still " + clipsNow + ")");
         }
     }
-    return n;
+
+    if (!workingMethod) {
+        log("ERROR: No razor method worked. Sequence may have no clips at cut times.");
+        return 0;
+    }
+
+    // ── Apply razor to all remaining cut times ────────────
+    app.enableQE();
+    qeSeq = qe.project.getActiveSequence();
+
+    for (var ri = 0; ri < cutTimes.length; ri++) {
+        if (ri === testIdx) continue; // already cut during discovery
+        var arg;
+        if (workingMethod.desc.indexOf("TC") !== -1) arg = secsToTC(cutTimes[ri], fps);
+        else if (workingMethod.desc.indexOf("ticks") !== -1) arg = secondsToTicks(cutTimes[ri]);
+        else arg = String(cutTimes[ri]);
+        try { qeSeq[workingMethod.fn](arg); } catch (e) { log("Razor at " + cutTimes[ri].toFixed(3) + "s failed: " + e); }
+    }
+
+    var clipsAfterRazor = countClips(app.project.activeSequence);
+    log("After razor: " + clipsAfterRazor + " clips");
+
+    // ── Delete or disable clips in ranges (reverse order) ─
+    var reversedRanges = merged.slice().sort(function (a, b) { return b.start - a.start; });
+    var totalDeleted = 0;
+    var modifiedVideoTracks = {}, modifiedAudioTracks = {};
+
+    for (var rri = 0; rri < reversedRanges.length; rri++) {
+        var rng = reversedRanges[rri];
+        var rangeDeleted = 0;
+
+        // Build track list
+        var seqRef = app.project.activeSequence;
+        if (!seqRef) { log("Lost sequence at range " + rri); break; }
+
+        var trackList = [];
+        for (var tvl = 0; tvl < seqRef.videoTracks.numTracks; tvl++) trackList.push({ type: "video", idx: tvl });
+        for (var tal = 0; tal < seqRef.audioTracks.numTracks; tal++) trackList.push({ type: "audio", idx: tal });
+
+        for (var tli = 0; tli < trackList.length; tli++) {
+            var tinfo = trackList[tli];
+            for (var pass = 0; pass < 20; pass++) {
+                // Re-fetch sequence and track fresh every pass
+                seqRef = app.project.activeSequence;
+                if (!seqRef) break;
+                var track = (tinfo.type === "video") ? seqRef.videoTracks[tinfo.idx] : seqRef.audioTracks[tinfo.idx];
+                if (!track || track.clips.numItems === 0) break;
+
+                // Find clip whose MIDPOINT is inside this range
+                var foundIdx = -1;
+                for (var sci = track.clips.numItems - 1; sci >= 0; sci--) {
+                    var sc = track.clips[sci];
+                    var scMid = (getSeconds(sc.start) + getSeconds(sc.end)) / 2;
+                    if (scMid >= rng.start && scMid <= rng.end) { foundIdx = sci; break; }
+                }
+                if (foundIdx < 0) break;
+
+                // Re-fetch clip reference immediately before operation
+                seqRef = app.project.activeSequence;
+                track = (tinfo.type === "video") ? seqRef.videoTracks[tinfo.idx] : seqRef.audioTracks[tinfo.idx];
+                var clipRef = track.clips[foundIdx];
+                var cStart = getSeconds(clipRef.start), cEnd = getSeconds(clipRef.end);
+                var clipsBefore2 = track.clips.numItems;
+
+                if (mode === "disable") {
+                    try {
+                        clipRef.disabled = true;
+                        rangeDeleted++;
+                        log("  DISABLE " + tinfo.type + "[" + tinfo.idx + "][" + foundIdx + "] " + cStart.toFixed(2) + "-" + cEnd.toFixed(2));
+                    } catch (de) { log("  DISABLE ERR: " + de); break; }
+                } else {
+                    // Ripple delete: remove(ripple=true, deleteFromProject=false)
+                    try {
+                        clipRef.remove(true, false);
+                    } catch (de) {
+                        log("  DEL ERR: " + de);
+                        try { track.clips[foundIdx].remove(false, false); } catch (e2) {}
+                        break;
+                    }
+                    var clipsAfter2 = track.clips.numItems;
+                    if (clipsAfter2 < clipsBefore2) {
+                        rangeDeleted++;
+                        totalDeleted++;
+                        if (tinfo.type === "video") modifiedVideoTracks[tinfo.idx] = true;
+                        else modifiedAudioTracks[tinfo.idx] = true;
+                        log("  DEL " + tinfo.type + "[" + tinfo.idx + "][" + foundIdx + "] " + cStart.toFixed(2) + "-" + cEnd.toFixed(2));
+                    } else {
+                        // remove() had no effect — try without ripple
+                        log("  WARN remove(true) no effect, trying remove(false)");
+                        try {
+                            seqRef = app.project.activeSequence;
+                            track = (tinfo.type === "video") ? seqRef.videoTracks[tinfo.idx] : seqRef.audioTracks[tinfo.idx];
+                            if (track && track.clips.numItems > foundIdx) {
+                                track.clips[foundIdx].remove(false, false);
+                                if (track.clips.numItems < clipsBefore2) {
+                                    rangeDeleted++;
+                                    totalDeleted++;
+                                }
+                            }
+                        } catch (e2) { log("  FAIL fallback: " + e2); break; }
+                    }
+                }
+            }
+        }
+        log("Range " + rri + " (" + rng.start.toFixed(2) + "-" + rng.end.toFixed(2) + "s): " + rangeDeleted + " ops");
+    }
+
+    // ── Close gaps on modified tracks (ripple mode only) ──
+    if (mode === "ripple") {
+        seqRef = app.project.activeSequence;
+        if (seqRef) {
+            var gapsFixed = 0;
+            function closeGapsOnTrack(clips) {
+                // Build sorted clip list and move each clip to close gaps
+                var sorted = [];
+                for (var ci = 0; ci < clips.numItems; ci++) sorted.push(ci);
+                sorted.sort(function (a, b) { return getSeconds(clips[a].start) - getSeconds(clips[b].start); });
+
+                var cursor = 0;
+                for (var si = 0; si < sorted.length; si++) {
+                    seqRef = app.project.activeSequence;
+                    var expectedStart = cursor;
+                    var c = clips[sorted[si]];
+                    var cStart = getSeconds(c.start);
+                    var cDur = getSeconds(c.duration);
+                    if (cStart - expectedStart > 0.02) {
+                        try {
+                            c.move(expectedStart - cStart);
+                            gapsFixed++;
+                        } catch (me) {}
+                    }
+                    cursor = expectedStart + cDur;
+                }
+            }
+
+            for (var gvt = 0; gvt < seqRef.videoTracks.numTracks; gvt++) {
+                if (!modifiedVideoTracks[gvt]) continue;
+                try { closeGapsOnTrack(seqRef.videoTracks[gvt].clips); } catch (e) {}
+            }
+            for (var gat = 0; gat < seqRef.audioTracks.numTracks; gat++) {
+                if (!modifiedAudioTracks[gat]) continue;
+                try { closeGapsOnTrack(seqRef.audioTracks[gat].clips); } catch (e) {}
+            }
+            if (gapsFixed > 0) log("Closed " + gapsFixed + " gaps");
+        }
+    }
+
+    log("Done. totalDeleted=" + totalDeleted);
+    return totalDeleted;
 }
 
 // ============================================================
@@ -488,42 +467,19 @@ function clearSilenceMarkers() {
     try {
         var seq = app.project.activeSequence;
         if (!seq) return error("No active sequence.");
-
-        var markers = seq.markers;
-        var toRemove = [];
-        var m = markers.getFirstMarker();
-        while (m) {
-            if (m.name === "Silence") toRemove.push(m);
-            m = markers.getNextMarker(m);
-        }
-        for (var i = 0; i < toRemove.length; i++) markers.deleteMarker(toRemove[i]);
-
+        var toRemove = [], m = seq.markers.getFirstMarker();
+        while (m) { if (m.name === "Silence") toRemove.push(m); m = seq.markers.getNextMarker(m); }
+        for (var i = 0; i < toRemove.length; i++) seq.markers.deleteMarker(toRemove[i]);
         log("Cleared " + toRemove.length + " markers");
         return result({ removed: toRemove.length });
-    } catch (e) {
-        return error("clearSilenceMarkers: " + e.toString());
-    }
+    } catch (e) { return error("clearSilenceMarkers: " + e.toString()); }
 }
 
-// ============================================================
-// MISC
-// ============================================================
-
 function getExtensionPath() {
-    try {
-        var f = new File($.fileName);
-        return result({ path: f.parent.parent.fsName });
-    } catch (e) {
-        return error("getExtensionPath: " + e.toString());
-    }
+    try { return result({ path: new File($.fileName).parent.parent.fsName }); }
+    catch (e) { return error("getExtensionPath: " + e.toString()); }
 }
 
 function getFFmpegPath() {
-    try {
-        var isWin = ($.os.indexOf("Windows") !== -1);
-        var exe = isWin ? "ffmpeg.exe" : "ffmpeg";
-        return result({ path: exe, source: "path" });
-    } catch (e) {
-        return error("getFFmpegPath: " + e.toString());
-    }
+    return result({ path: "ffmpeg", source: "path" });
 }
