@@ -353,7 +353,49 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
     var clipsAfterRazor = countClips(app.project.activeSequence);
     log("After razor: " + clipsAfterRazor + " clips");
 
-    // ── PHASE 1: Delete ALL silence clips across ALL ranges (no ripple) ────────
+    // ── DISABLE MODE: single forward sweep, collect all refs, batch-set disabled ─
+    // Indices are stable (no removes), so one pass through the whole timeline is
+    // enough — no re-fetching per clip, no inner retry loops.
+    if (mode === "disable") {
+        var seqD = app.project.activeSequence;
+        if (!seqD) { log("Lost sequence before disable sweep"); return 0; }
+        var toDisable = [];
+
+        for (var dvt = 0; dvt < seqD.videoTracks.numTracks; dvt++) {
+            var dvtr = seqD.videoTracks[dvt];
+            for (var dvci = 0; dvci < dvtr.clips.numItems; dvci++) {
+                var dvc = dvtr.clips[dvci];
+                var dvMid = (getSeconds(dvc.start) + getSeconds(dvc.end)) / 2;
+                for (var dri = 0; dri < merged.length; dri++) {
+                    if (dvMid >= merged[dri].start && dvMid <= merged[dri].end) {
+                        toDisable.push(dvc); break;
+                    }
+                }
+            }
+        }
+        for (var dat = 0; dat < seqD.audioTracks.numTracks; dat++) {
+            var datr = seqD.audioTracks[dat];
+            for (var daci = 0; daci < datr.clips.numItems; daci++) {
+                var dac = datr.clips[daci];
+                var daMid = (getSeconds(dac.start) + getSeconds(dac.end)) / 2;
+                for (var dri2 = 0; dri2 < merged.length; dri2++) {
+                    if (daMid >= merged[dri2].start && daMid <= merged[dri2].end) {
+                        toDisable.push(dac); break;
+                    }
+                }
+            }
+        }
+
+        log("Disabling " + toDisable.length + " clips...");
+        var disabledCount = 0;
+        for (var di = 0; di < toDisable.length; di++) {
+            try { toDisable[di].disabled = true; disabledCount++; } catch (de) {}
+        }
+        log("Done. Disabled " + disabledCount + " clips.");
+        return disabledCount;
+    }
+
+    // ── RIPPLE MODE PHASE 1: Delete ALL silence clips (no ripple) ───────────────
     // Process right-to-left so index shifts from remove() affect only already-
     // processed (rightward) clips, not the ones we still need to find.
     var reversedRanges = merged.slice().sort(function (a, b) { return b.start - a.start; });
@@ -386,15 +428,11 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
                 vtrack = seqRef.videoTracks[vt];
                 var vcRef = vtrack.clips[vfound];
                 var vcS = getSeconds(vcRef.start), vcE = getSeconds(vcRef.end);
-                if (mode === "disable") {
-                    try { vcRef.disabled = true; rangeDeleted++; log("  DIS video[" + vt + "] " + vcS.toFixed(2) + "-" + vcE.toFixed(2)); } catch (de) { break; }
-                } else {
-                    try {
-                        vcRef.remove(false, false);
-                        rangeDeleted++; totalDeleted++;
-                        log("  DEL video[" + vt + "][" + vfound + "] " + vcS.toFixed(2) + "-" + vcE.toFixed(2));
-                    } catch (de) { log("  DEL ERR video: " + de); break; }
-                }
+                try {
+                    vcRef.remove(false, false);
+                    rangeDeleted++; totalDeleted++;
+                    log("  DEL video[" + vt + "][" + vfound + "] " + vcS.toFixed(2) + "-" + vcE.toFixed(2));
+                } catch (de) { log("  DEL ERR video: " + de); break; }
             }
         }
 
@@ -416,15 +454,11 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
                 atrack = seqRef.audioTracks[at];
                 var acRef = atrack.clips[afound];
                 var acS = getSeconds(acRef.start), acE = getSeconds(acRef.end);
-                if (mode === "disable") {
-                    try { acRef.disabled = true; rangeDeleted++; log("  DIS audio[" + at + "] " + acS.toFixed(2) + "-" + acE.toFixed(2)); } catch (de) { break; }
-                } else {
-                    try {
-                        acRef.remove(false, false);
-                        rangeDeleted++; totalDeleted++;
-                        log("  DEL audio[" + at + "][" + afound + "] " + acS.toFixed(2) + "-" + acE.toFixed(2));
-                    } catch (de) { log("  DEL ERR audio: " + de); break; }
-                }
+                try {
+                    acRef.remove(false, false);
+                    rangeDeleted++; totalDeleted++;
+                    log("  DEL audio[" + at + "][" + afound + "] " + acS.toFixed(2) + "-" + acE.toFixed(2));
+                } catch (de) { log("  DEL ERR audio: " + de); break; }
             }
         }
 
