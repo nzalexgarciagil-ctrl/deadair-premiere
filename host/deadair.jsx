@@ -395,76 +395,45 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
         return disabledCount;
     }
 
-    // ── RIPPLE MODE PHASE 1: Delete ALL silence clips (no ripple) ───────────────
-    // Process right-to-left so index shifts from remove() affect only already-
-    // processed (rightward) clips, not the ones we still need to find.
-    var reversedRanges = merged.slice().sort(function (a, b) { return b.start - a.start; });
+    // ── RIPPLE MODE PHASE 1: collect all clip refs, then batch-remove ───────────
+    // Single forward sweep — one sequence fetch, no inner retry loops.
+    // remove(false,false) doesn't shift positions, so all refs captured up-front
+    // stay valid even after earlier removes shift collection indices.
     var totalDeleted = 0;
+    var toDelete = [];
 
-    for (var rri = 0; rri < reversedRanges.length; rri++) {
-        var rng = reversedRanges[rri];
-        var rangeDeleted = 0;
+    var seqR = app.project.activeSequence;
+    if (!seqR) { log("Lost sequence before delete sweep"); return 0; }
 
-        var seqRef = app.project.activeSequence;
-        if (!seqRef) { log("Lost sequence at range " + rri); break; }
-        var numVT = seqRef.videoTracks.numTracks;
-        var numAT = seqRef.audioTracks.numTracks;
-
-        // Video clips
-        for (var vt = 0; vt < numVT; vt++) {
-            for (var vpass = 0; vpass < 20; vpass++) {
-                seqRef = app.project.activeSequence;
-                if (!seqRef) break;
-                var vtrack = seqRef.videoTracks[vt];
-                if (!vtrack || vtrack.clips.numItems === 0) break;
-                var vfound = -1;
-                for (var vsci = vtrack.clips.numItems - 1; vsci >= 0; vsci--) {
-                    var vsc = vtrack.clips[vsci];
-                    var vMid = (getSeconds(vsc.start) + getSeconds(vsc.end)) / 2;
-                    if (vMid >= rng.start && vMid <= rng.end) { vfound = vsci; break; }
+    for (var dvt = 0; dvt < seqR.videoTracks.numTracks; dvt++) {
+        var dvtr = seqR.videoTracks[dvt];
+        for (var dvci = 0; dvci < dvtr.clips.numItems; dvci++) {
+            var dvc = dvtr.clips[dvci];
+            var dvMid = (getSeconds(dvc.start) + getSeconds(dvc.end)) / 2;
+            for (var dmi = 0; dmi < merged.length; dmi++) {
+                if (dvMid >= merged[dmi].start && dvMid <= merged[dmi].end) {
+                    toDelete.push(dvc); break;
                 }
-                if (vfound < 0) break;
-                seqRef = app.project.activeSequence;
-                vtrack = seqRef.videoTracks[vt];
-                var vcRef = vtrack.clips[vfound];
-                var vcS = getSeconds(vcRef.start), vcE = getSeconds(vcRef.end);
-                try {
-                    vcRef.remove(false, false);
-                    rangeDeleted++; totalDeleted++;
-                    log("  DEL video[" + vt + "][" + vfound + "] " + vcS.toFixed(2) + "-" + vcE.toFixed(2));
-                } catch (de) { log("  DEL ERR video: " + de); break; }
             }
         }
-
-        // Audio clips
-        for (var at = 0; at < numAT; at++) {
-            for (var apass = 0; apass < 20; apass++) {
-                seqRef = app.project.activeSequence;
-                if (!seqRef) break;
-                var atrack = seqRef.audioTracks[at];
-                if (!atrack || atrack.clips.numItems === 0) break;
-                var afound = -1;
-                for (var asci = atrack.clips.numItems - 1; asci >= 0; asci--) {
-                    var asc = atrack.clips[asci];
-                    var aMid = (getSeconds(asc.start) + getSeconds(asc.end)) / 2;
-                    if (aMid >= rng.start && aMid <= rng.end) { afound = asci; break; }
+    }
+    for (var dat = 0; dat < seqR.audioTracks.numTracks; dat++) {
+        var datr = seqR.audioTracks[dat];
+        for (var daci = 0; daci < datr.clips.numItems; daci++) {
+            var dac = datr.clips[daci];
+            var daMid = (getSeconds(dac.start) + getSeconds(dac.end)) / 2;
+            for (var dmi2 = 0; dmi2 < merged.length; dmi2++) {
+                if (daMid >= merged[dmi2].start && daMid <= merged[dmi2].end) {
+                    toDelete.push(dac); break;
                 }
-                if (afound < 0) break;
-                seqRef = app.project.activeSequence;
-                atrack = seqRef.audioTracks[at];
-                var acRef = atrack.clips[afound];
-                var acS = getSeconds(acRef.start), acE = getSeconds(acRef.end);
-                try {
-                    acRef.remove(false, false);
-                    rangeDeleted++; totalDeleted++;
-                    log("  DEL audio[" + at + "][" + afound + "] " + acS.toFixed(2) + "-" + acE.toFixed(2));
-                } catch (de) { log("  DEL ERR audio: " + de); break; }
             }
         }
-
-        log("Range " + rri + " (" + rng.start.toFixed(2) + "-" + rng.end.toFixed(2) + "s): " + rangeDeleted + " del");
     }
 
+    log("Collected " + toDelete.length + " clips to delete");
+    for (var di = 0; di < toDelete.length; di++) {
+        try { toDelete[di].remove(false, false); totalDeleted++; } catch (de) {}
+    }
     log("All deletions done. totalDeleted=" + totalDeleted);
 
     // ── PHASE 2: Single cursor sweep — close ALL gaps on every track at once ──
