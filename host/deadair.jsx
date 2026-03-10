@@ -104,6 +104,18 @@ function getSequenceInfo() {
     try {
         var seq = app.project.activeSequence;
         if (!seq) return error("No active sequence.");
+
+        var fps = getFps(seq);
+        var frameDuration = 1 / fps;
+
+        // Width / height
+        var width = 0, height = 0;
+        try { width = seq.width; height = seq.height; } catch (e) {}
+
+        // Duration in seconds
+        var durationSecs = 0;
+        try { durationSecs = getSeconds(seq.end); } catch (e) {}
+
         var audioTracks = [];
         for (var i = 0; i < seq.audioTracks.numTracks; i++) {
             var t = seq.audioTracks[i];
@@ -114,7 +126,17 @@ function getSequenceInfo() {
             var t = seq.videoTracks[i];
             videoTracks.push({ index: i, name: t.name, clipCount: t.clips.numItems });
         }
-        return result({ name: seq.name, audioTracks: audioTracks, videoTracks: videoTracks });
+
+        return result({
+            name:          seq.name,
+            fps:           fps,
+            frameDuration: frameDuration,
+            width:         width,
+            height:        height,
+            durationSecs:  durationSecs,
+            audioTracks:   audioTracks,
+            videoTracks:   videoTracks
+        });
     } catch (e) { return error("getSequenceInfo: " + e.toString()); }
 }
 
@@ -167,6 +189,7 @@ function addSilenceMarkers(regionsStr) {
                 var m = seq.markers.createMarker(regions[i].start);
                 m.name = "Silence";
                 m.comments = "Duration: " + (regions[i].end - regions[i].start).toFixed(2) + "s";
+                m.duration = regions[i].end - regions[i].start;
                 m.setTypeAsComment();
                 count++;
             } catch (me) { log("Marker " + i + " failed: " + me.toString()); }
@@ -434,7 +457,7 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
                 var vcursor = 0;
                 for (var gvii = 0; gvii < vitems.length; gvii++) {
                     var vgap = vitems[gvii].start - vcursor;
-                    if (vgap > 0.02) {
+                    if (vgap > (0.4 / fps)) { // < 1 frame at actual sequence fps
                         try { vitems[gvii].obj.move(-vgap); totalMoved++; } catch (me) {}
                     }
                     vcursor += vitems[gvii].dur;
@@ -455,7 +478,7 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
                 var acursor = 0;
                 for (var gaii = 0; gaii < aitems.length; gaii++) {
                     var agap = aitems[gaii].start - acursor;
-                    if (agap > 0.02) {
+                    if (agap > (0.4 / fps)) { // < 1 frame at actual sequence fps
                         try { aitems[gaii].obj.move(-agap); totalMoved++; } catch (me) {}
                     }
                     acursor += aitems[gaii].dur;

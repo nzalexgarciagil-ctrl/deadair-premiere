@@ -170,6 +170,8 @@
     // TRACK LIST
     // ============================================================
 
+    var seqSettings = null; // populated by refreshTrackList, used throughout
+
     function refreshTrackList() {
         console.log("Fetching sequence info...");
         evalScript("getSequenceInfo()", function (resp) {
@@ -179,16 +181,33 @@
                 showStatus("Open a sequence to begin.", "info");
                 return;
             }
-            console.log("Sequence: " + r.data.name + " | Audio tracks: " + r.data.audioTracks.length);
-            for (var i = 0; i < r.data.audioTracks.length; i++) {
-                var t = r.data.audioTracks[i];
+
+            seqSettings = r.data;
+
+            var fpsStr  = seqSettings.fps ? seqSettings.fps.toFixed(2) + " fps" : "? fps";
+            var sizeStr = (seqSettings.width && seqSettings.height)
+                ? seqSettings.width + "x" + seqSettings.height
+                : "?x?";
+            var durStr  = seqSettings.durationSecs
+                ? (seqSettings.durationSecs / 60).toFixed(1) + " min"
+                : "";
+
+            console.log("Sequence: " + seqSettings.name
+                + " | " + fpsStr
+                + " | " + sizeStr
+                + (durStr ? " | " + durStr : "")
+                + " | Audio tracks: " + seqSettings.audioTracks.length);
+
+            for (var i = 0; i < seqSettings.audioTracks.length; i++) {
+                var t = seqSettings.audioTracks[i];
                 console.log("  Track " + t.index + ": " + t.name + " (" + t.clipCount + " clips)");
             }
+
             hideStatus();
             var sel = dom.trackSelect;
             while (sel.options.length > 1) sel.remove(1);
-            for (var i = 0; i < r.data.audioTracks.length; i++) {
-                var t = r.data.audioTracks[i];
+            for (var i = 0; i < seqSettings.audioTracks.length; i++) {
+                var t = seqSettings.audioTracks[i];
                 var opt = document.createElement("option");
                 opt.value = String(t.index);
                 opt.textContent = t.name + " (" + t.clipCount + " clips)";
