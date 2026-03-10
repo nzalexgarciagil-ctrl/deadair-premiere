@@ -330,128 +330,139 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
     var clipsAfterRazor = countClips(app.project.activeSequence);
     log("After razor: " + clipsAfterRazor + " clips");
 
-    // ── Delete or disable clips in ranges (reverse order) ─
+    // ── PHASE 1: Delete ALL silence clips across ALL ranges (no ripple) ────────
+    // Process right-to-left so index shifts from remove() affect only already-
+    // processed (rightward) clips, not the ones we still need to find.
     var reversedRanges = merged.slice().sort(function (a, b) { return b.start - a.start; });
     var totalDeleted = 0;
-    var modifiedVideoTracks = {}, modifiedAudioTracks = {};
 
     for (var rri = 0; rri < reversedRanges.length; rri++) {
         var rng = reversedRanges[rri];
         var rangeDeleted = 0;
 
-        // Build track list
         var seqRef = app.project.activeSequence;
         if (!seqRef) { log("Lost sequence at range " + rri); break; }
+        var numVT = seqRef.videoTracks.numTracks;
+        var numAT = seqRef.audioTracks.numTracks;
 
-        var trackList = [];
-        for (var tvl = 0; tvl < seqRef.videoTracks.numTracks; tvl++) trackList.push({ type: "video", idx: tvl });
-        for (var tal = 0; tal < seqRef.audioTracks.numTracks; tal++) trackList.push({ type: "audio", idx: tal });
-
-        for (var tli = 0; tli < trackList.length; tli++) {
-            var tinfo = trackList[tli];
-            for (var pass = 0; pass < 20; pass++) {
-                // Re-fetch sequence and track fresh every pass
+        // Video clips
+        for (var vt = 0; vt < numVT; vt++) {
+            for (var vpass = 0; vpass < 20; vpass++) {
                 seqRef = app.project.activeSequence;
                 if (!seqRef) break;
-                var track = (tinfo.type === "video") ? seqRef.videoTracks[tinfo.idx] : seqRef.audioTracks[tinfo.idx];
-                if (!track || track.clips.numItems === 0) break;
-
-                // Find clip whose MIDPOINT is inside this range
-                var foundIdx = -1;
-                for (var sci = track.clips.numItems - 1; sci >= 0; sci--) {
-                    var sc = track.clips[sci];
-                    var scMid = (getSeconds(sc.start) + getSeconds(sc.end)) / 2;
-                    if (scMid >= rng.start && scMid <= rng.end) { foundIdx = sci; break; }
+                var vtrack = seqRef.videoTracks[vt];
+                if (!vtrack || vtrack.clips.numItems === 0) break;
+                var vfound = -1;
+                for (var vsci = vtrack.clips.numItems - 1; vsci >= 0; vsci--) {
+                    var vsc = vtrack.clips[vsci];
+                    var vMid = (getSeconds(vsc.start) + getSeconds(vsc.end)) / 2;
+                    if (vMid >= rng.start && vMid <= rng.end) { vfound = vsci; break; }
                 }
-                if (foundIdx < 0) break;
-
-                // Re-fetch clip reference immediately before operation
+                if (vfound < 0) break;
                 seqRef = app.project.activeSequence;
-                track = (tinfo.type === "video") ? seqRef.videoTracks[tinfo.idx] : seqRef.audioTracks[tinfo.idx];
-                var clipRef = track.clips[foundIdx];
-                var cStart = getSeconds(clipRef.start), cEnd = getSeconds(clipRef.end);
-                var clipsBefore2 = track.clips.numItems;
-
+                vtrack = seqRef.videoTracks[vt];
+                var vcRef = vtrack.clips[vfound];
+                var vcS = getSeconds(vcRef.start), vcE = getSeconds(vcRef.end);
                 if (mode === "disable") {
-                    try {
-                        clipRef.disabled = true;
-                        rangeDeleted++;
-                        log("  DISABLE " + tinfo.type + "[" + tinfo.idx + "][" + foundIdx + "] " + cStart.toFixed(2) + "-" + cEnd.toFixed(2));
-                    } catch (de) { log("  DISABLE ERR: " + de); break; }
+                    try { vcRef.disabled = true; rangeDeleted++; log("  DIS video[" + vt + "] " + vcS.toFixed(2) + "-" + vcE.toFixed(2)); } catch (de) { break; }
                 } else {
-                    // Ripple delete: remove(ripple=true, deleteFromProject=false)
                     try {
-                        clipRef.remove(true, false);
-                    } catch (de) {
-                        log("  DEL ERR: " + de);
-                        try { track.clips[foundIdx].remove(false, false); } catch (e2) {}
-                        break;
-                    }
-                    var clipsAfter2 = track.clips.numItems;
-                    if (clipsAfter2 < clipsBefore2) {
-                        rangeDeleted++;
-                        totalDeleted++;
-                        if (tinfo.type === "video") modifiedVideoTracks[tinfo.idx] = true;
-                        else modifiedAudioTracks[tinfo.idx] = true;
-                        log("  DEL " + tinfo.type + "[" + tinfo.idx + "][" + foundIdx + "] " + cStart.toFixed(2) + "-" + cEnd.toFixed(2));
-                    } else {
-                        // remove() had no effect — try without ripple
-                        log("  WARN remove(true) no effect, trying remove(false)");
-                        try {
-                            seqRef = app.project.activeSequence;
-                            track = (tinfo.type === "video") ? seqRef.videoTracks[tinfo.idx] : seqRef.audioTracks[tinfo.idx];
-                            if (track && track.clips.numItems > foundIdx) {
-                                track.clips[foundIdx].remove(false, false);
-                                if (track.clips.numItems < clipsBefore2) {
-                                    rangeDeleted++;
-                                    totalDeleted++;
-                                }
-                            }
-                        } catch (e2) { log("  FAIL fallback: " + e2); break; }
-                    }
+                        vcRef.remove(false, false);
+                        rangeDeleted++; totalDeleted++;
+                        log("  DEL video[" + vt + "][" + vfound + "] " + vcS.toFixed(2) + "-" + vcE.toFixed(2));
+                    } catch (de) { log("  DEL ERR video: " + de); break; }
                 }
             }
         }
-        log("Range " + rri + " (" + rng.start.toFixed(2) + "-" + rng.end.toFixed(2) + "s): " + rangeDeleted + " ops");
+
+        // Audio clips
+        for (var at = 0; at < numAT; at++) {
+            for (var apass = 0; apass < 20; apass++) {
+                seqRef = app.project.activeSequence;
+                if (!seqRef) break;
+                var atrack = seqRef.audioTracks[at];
+                if (!atrack || atrack.clips.numItems === 0) break;
+                var afound = -1;
+                for (var asci = atrack.clips.numItems - 1; asci >= 0; asci--) {
+                    var asc = atrack.clips[asci];
+                    var aMid = (getSeconds(asc.start) + getSeconds(asc.end)) / 2;
+                    if (aMid >= rng.start && aMid <= rng.end) { afound = asci; break; }
+                }
+                if (afound < 0) break;
+                seqRef = app.project.activeSequence;
+                atrack = seqRef.audioTracks[at];
+                var acRef = atrack.clips[afound];
+                var acS = getSeconds(acRef.start), acE = getSeconds(acRef.end);
+                if (mode === "disable") {
+                    try { acRef.disabled = true; rangeDeleted++; log("  DIS audio[" + at + "] " + acS.toFixed(2) + "-" + acE.toFixed(2)); } catch (de) { break; }
+                } else {
+                    try {
+                        acRef.remove(false, false);
+                        rangeDeleted++; totalDeleted++;
+                        log("  DEL audio[" + at + "][" + afound + "] " + acS.toFixed(2) + "-" + acE.toFixed(2));
+                    } catch (de) { log("  DEL ERR audio: " + de); break; }
+                }
+            }
+        }
+
+        log("Range " + rri + " (" + rng.start.toFixed(2) + "-" + rng.end.toFixed(2) + "s): " + rangeDeleted + " del");
     }
 
-    // ── Close gaps on modified tracks (ripple mode only) ──
-    if (mode === "ripple") {
-        seqRef = app.project.activeSequence;
-        if (seqRef) {
-            var gapsFixed = 0;
-            function closeGapsOnTrack(clips) {
-                // Build sorted clip list and move each clip to close gaps
-                var sorted = [];
-                for (var ci = 0; ci < clips.numItems; ci++) sorted.push(ci);
-                sorted.sort(function (a, b) { return getSeconds(clips[a].start) - getSeconds(clips[b].start); });
+    log("All deletions done. totalDeleted=" + totalDeleted);
 
-                var cursor = 0;
-                for (var si = 0; si < sorted.length; si++) {
-                    seqRef = app.project.activeSequence;
-                    var expectedStart = cursor;
-                    var c = clips[sorted[si]];
-                    var cStart = getSeconds(c.start);
-                    var cDur = getSeconds(c.duration);
-                    if (cStart - expectedStart > 0.02) {
-                        try {
-                            c.move(expectedStart - cStart);
-                            gapsFixed++;
-                        } catch (me) {}
+    // ── PHASE 2: Single cursor sweep — close ALL gaps on every track at once ──
+    // Because audio and video both had clips deleted at the same positions,
+    // the same cursor logic applied independently to each track produces
+    // identical offsets → audio and video stay perfectly in sync.
+    if (mode === "ripple" && totalDeleted > 0) {
+        var seqG = app.project.activeSequence;
+        if (seqG) {
+            var totalMoved = 0;
+
+            // Video tracks
+            for (var gvt = 0; gvt < seqG.videoTracks.numTracks; gvt++) {
+                seqG = app.project.activeSequence;
+                var gvtr = seqG.videoTracks[gvt];
+                if (!gvtr || gvtr.clips.numItems === 0) continue;
+                // Snapshot: capture object refs + positions before touching anything
+                var vitems = [];
+                for (var gvci = 0; gvci < gvtr.clips.numItems; gvci++) {
+                    var gvc = gvtr.clips[gvci];
+                    vitems.push({ obj: gvc, start: getSeconds(gvc.start), dur: getSeconds(gvc.duration) });
+                }
+                vitems.sort(function (a, b) { return a.start - b.start; });
+                var vcursor = 0;
+                for (var gvii = 0; gvii < vitems.length; gvii++) {
+                    var vgap = vitems[gvii].start - vcursor;
+                    if (vgap > 0.02) {
+                        try { vitems[gvii].obj.move(-vgap); totalMoved++; } catch (me) {}
                     }
-                    cursor = expectedStart + cDur;
+                    vcursor += vitems[gvii].dur;
                 }
             }
 
-            for (var gvt = 0; gvt < seqRef.videoTracks.numTracks; gvt++) {
-                if (!modifiedVideoTracks[gvt]) continue;
-                try { closeGapsOnTrack(seqRef.videoTracks[gvt].clips); } catch (e) {}
+            // Audio tracks
+            for (var gat = 0; gat < seqG.audioTracks.numTracks; gat++) {
+                seqG = app.project.activeSequence;
+                var gatr = seqG.audioTracks[gat];
+                if (!gatr || gatr.clips.numItems === 0) continue;
+                var aitems = [];
+                for (var gaci = 0; gaci < gatr.clips.numItems; gaci++) {
+                    var gac = gatr.clips[gaci];
+                    aitems.push({ obj: gac, start: getSeconds(gac.start), dur: getSeconds(gac.duration) });
+                }
+                aitems.sort(function (a, b) { return a.start - b.start; });
+                var acursor = 0;
+                for (var gaii = 0; gaii < aitems.length; gaii++) {
+                    var agap = aitems[gaii].start - acursor;
+                    if (agap > 0.02) {
+                        try { aitems[gaii].obj.move(-agap); totalMoved++; } catch (me) {}
+                    }
+                    acursor += aitems[gaii].dur;
+                }
             }
-            for (var gat = 0; gat < seqRef.audioTracks.numTracks; gat++) {
-                if (!modifiedAudioTracks[gat]) continue;
-                try { closeGapsOnTrack(seqRef.audioTracks[gat].clips); } catch (e) {}
-            }
-            if (gapsFixed > 0) log("Closed " + gapsFixed + " gaps");
+
+            log("Gap sweep done: " + totalMoved + " clips moved");
         }
     }
 
