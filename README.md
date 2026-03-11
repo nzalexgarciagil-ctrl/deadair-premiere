@@ -1,19 +1,10 @@
 # DeadAir - Silence Remover for Premiere Pro
 
-If you edit talking head videos, podcasts, or interviews, a big chunk of your edit time is just scrubbing through dead air and cutting it out manually. DeadAir does that for you inside Premiere. No subscription, no account, no leaving the app.
+Scrubbing through dead air by hand is one of those editing tasks that eats 20 minutes a session and feels like it should've been automated years ago. DeadAir is a free Premiere panel that does it for you. No subscription, no account, nothing outside Premiere.
 
 ![DeadAir Demo](demo.gif)
 
-It analyzes your audio, finds the silences, and either ripple deletes them, disables the clips, or drops markers so you can review before committing. A/V sync is handled correctly even across multiple tracks, which is the part that trips up other tools.
-
----
-
-## What it solves
-
-- **Scrubbing through dead air by hand** — click Analyze, it finds every gap above your threshold and removes them in one pass
-- **A/V desync after ripple deletes** — uses a two-phase batch approach so audio and video stay locked regardless of track count
-- **"I don't know what threshold to set"** — Auto mode samples your clips and suggests a starting point based on your actual noise floor
-- **Accidentally cutting too hard** — Markers mode shows you exactly what will be removed before you touch anything; Disable mode lets you undo the whole thing
+Point it at your timeline, set a threshold (or let it figure one out), and it cuts the gaps. Ripple delete, disable, or just drop markers if you want to review first. A/V sync works correctly across multiple tracks, which is where other tools tend to fall apart.
 
 ---
 
