@@ -6,6 +6,9 @@
 (function () {
     "use strict";
 
+    var core = window.DeadAirCore;
+    if (!core) throw new Error("DeadAir core helpers failed to load.");
+
     var cs = new CSInterface();
     var analysisResults = null;
     var lastLoadedClips = null;
@@ -86,7 +89,7 @@
         });
 
         // Log system info immediately
-        console.log("DeadAir v1.0.1 ready");
+        console.log("DeadAir v1.2.0 ready");
         console.log("Platform: " + navigator.platform);
         console.log("AudioContext: " + (typeof AudioContext !== "undefined" ? "yes" : typeof webkitAudioContext !== "undefined" ? "webkit" : "MISSING"));
         console.log("XHR: " + (typeof XMLHttpRequest !== "undefined" ? "yes" : "MISSING"));
@@ -100,7 +103,7 @@
         statusBar:        document.getElementById("status-bar"),
         statusText:       document.getElementById("status-text"),
         threshold:        document.getElementById("threshold"),
-        thresholdValue:   document.getElementById("threshold-value"),
+        thresholdNumber:  document.getElementById("threshold-number"),
         minDuration:      document.getElementById("min-duration"),
         durationValue:    document.getElementById("duration-value"),
         padding:          document.getElementById("padding"),
@@ -132,6 +135,7 @@
         bindSliders();
         bindButtons();
         loadSettings();
+        updateModeUi();
         setTimeout(refreshTrackList, 600);
     }
 
@@ -139,10 +143,19 @@
     // SLIDERS
     // ============================================================
 
+    function setThreshold(value, persist) {
+        var normalized = core.normalizeThreshold(value);
+        dom.threshold.value = normalized;
+        dom.thresholdNumber.value = normalized;
+        if (persist) saveSettings();
+    }
+
     function bindSliders() {
         dom.threshold.addEventListener("input", function () {
-            dom.thresholdValue.textContent = this.value + " dB";
-            saveSettings();
+            setThreshold(this.value, true);
+        });
+        dom.thresholdNumber.addEventListener("change", function () {
+            setThreshold(this.value, true);
         });
         dom.minDuration.addEventListener("input", function () {
             dom.durationValue.textContent = parseFloat(this.value).toFixed(1) + "s";
@@ -164,6 +177,22 @@
         dom.btnExecute.addEventListener("click", executeRemoval);
         dom.btnCancel.addEventListener("click", cancelAnalysis);
         dom.btnClearMarkers.addEventListener("click", clearMarkers);
+
+        var modes = document.querySelectorAll('input[name="cut-mode"]');
+        for (var i = 0; i < modes.length; i++) {
+            modes[i].addEventListener("change", function () {
+                updateModeUi();
+                saveSettings();
+            });
+        }
+    }
+
+    function getSelectedMode() {
+        return document.querySelector('input[name="cut-mode"]:checked').value;
+    }
+
+    function updateModeUi() {
+        dom.btnExecute.textContent = core.modeInfo(getSelectedMode()).button;
     }
 
     // ============================================================
@@ -329,9 +358,9 @@
                     if (v > maxAmp) maxAmp = v;
                 }
             }
-            // Convert to dB, floor at -80
-            var db = maxAmp > 0 ? 20 * Math.log10(maxAmp) : -80;
-            if (db < -80) db = -80;
+            // Match the manual threshold range so very quiet recordings remain measurable.
+            var db = maxAmp > 0 ? 20 * Math.log10(maxAmp) : core.THRESHOLD_MIN;
+            if (db < core.THRESHOLD_MIN) db = core.THRESHOLD_MIN;
             dbValues.push(db);
         }
         return dbValues;
@@ -356,25 +385,14 @@
             return;
         }
 
-        allDb.sort(function (a, b) { return a - b; });
+        var suggestion = core.suggestThreshold(allDb);
+        var rounded = suggestion.threshold;
 
-        var noiseFloor  = allDb[Math.floor(allDb.length * 0.05)];  // 5th pct
-        var speechLevel = allDb[Math.floor(allDb.length * 0.70)];  // 70th pct
-        var gap = speechLevel - noiseFloor;
-
-        // Threshold sits 30% up from the noise floor toward speech
-        var suggestedDb = noiseFloor + gap * 0.30;
-        suggestedDb = Math.max(-55, Math.min(-15, suggestedDb));
-        var rounded = Math.round(suggestedDb);
-
-        // Update slider
-        dom.threshold.value = rounded;
-        dom.thresholdValue.textContent = rounded + " dB";
-        saveSettings();
+        setThreshold(rounded, true);
 
         // Show hint labels
-        dom.noiseFloorLabel.textContent  = "Floor: " + Math.round(noiseFloor) + "dB";
-        dom.speechLevelLabel.textContent = "Speech: " + Math.round(speechLevel) + "dB";
+        dom.noiseFloorLabel.textContent  = "Floor: " + Math.round(suggestion.noiseFloor) + "dB";
+        dom.speechLevelLabel.textContent = "Speech: " + Math.round(suggestion.speechLevel) + "dB";
         dom.noiseHint.classList.remove("hidden");
 
         var msg = "Auto-set to " + rounded + " dB";
@@ -409,7 +427,7 @@
     }
 
     function analyzeClips(clips) {
-        var thresholdLinear = Math.pow(10, parseFloat(dom.threshold.value) / 20);
+        var thresholdLinear = core.thresholdToLinear(dom.threshold.value);
         var minDuration     = parseFloat(dom.minDuration.value);
         var paddingSec      = parseInt(dom.padding.value) / 1000;
 
@@ -496,18 +514,16 @@
             var isVideoExt = /\.(mov|mp4|mxf|avi|mts|m2ts|r3d|braw|arw|dng)$/i.test(rawPath);
 
             if (!isVideoExt && sizeMB < 150) {
-                // Small audio file — read directly
-                console.log("  Strategy: fs.readFile (audio, small)");
-                fs.readFile(rawPath, function (err, data) {
-                    if (err) {
-                        console.warn("  fs.readFile failed: " + err.message + " — trying FFmpeg");
-                        tryFFmpeg(rawPath, clip, nr, callback);
-                        return;
-                    }
-                    // Node Buffer → ArrayBuffer
+                // CEP does not reliably deliver asynchronous Node callbacks.
+                console.log("  Strategy: fs.readFileSync (audio, small)");
+                try {
+                    var data = fs.readFileSync(rawPath);
                     var ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
                     decodeArrayBuffer(ab, clip, callback);
-                });
+                } catch (readError) {
+                    console.warn("  fs.readFileSync failed: " + readError.message + " — trying FFmpeg");
+                    tryFFmpeg(rawPath, clip, nr, callback);
+                }
             } else {
                 // Video or large file — extract audio via FFmpeg
                 console.log("  Strategy: FFmpeg audio extraction (video/large file)");
@@ -536,45 +552,51 @@
             console.log("  FFmpeg: " + ffmpegPath);
 
             var cp = nr("child_process");
-            // Extract audio: mono, 22050Hz, WAV piped to stdout — fast & tiny
-            var args = ["-i", rawPath, "-vn", "-ac", "1", "-ar", "22050", "-f", "wav", "pipe:1"];
-            console.log("  Running: ffmpeg " + args.join(" ").substring(0, 80) + "...");
+            var clipDuration = Math.max(0, clip.outPointSeconds - clip.inPointSeconds);
+            // Extract only the source range used on the timeline: mono, 22050Hz WAV.
+            var args = [
+                "-hide_banner", "-loglevel", "error",
+                "-ss", String(clip.inPointSeconds),
+                "-t", String(clipDuration),
+                "-i", rawPath,
+                "-vn", "-ac", "1", "-ar", "22050", "-f", "wav", "pipe:1"
+            ];
+            console.log("  Running bounded FFmpeg extraction for " + clipDuration.toFixed(1) + "s");
 
-            var chunks = [];
-            var totalBytes = 0;
-            var stderr = "";
-
-            var proc;
+            var execution;
             try {
-                proc = cp.spawn(ffmpegPath, args, { stdio: ["ignore", "pipe", "pipe"] });
-            } catch (e) {
-                console.error("  spawn failed: " + e.message);
-                callback("FFmpeg spawn error: " + e.message);
+                execution = cp.spawnSync(ffmpegPath, args, {
+                    encoding: null,
+                    windowsHide: true,
+                    timeout: 600000,
+                    maxBuffer: 512 * 1024 * 1024
+                });
+            } catch (spawnError) {
+                console.error("  FFmpeg spawn failed: " + spawnError.message);
+                callback("FFmpeg spawn error: " + spawnError.message);
                 return;
             }
 
-            proc.stdout.on("data", function (chunk) {
-                chunks.push(chunk);
-                totalBytes += chunk.length;
-            });
-            proc.stderr.on("data", function (d) { stderr += d.toString(); });
+            var output = execution.stdout;
+            var stderr = execution.stderr ? execution.stderr.toString() : "";
+            var totalBytes = output ? output.length : 0;
+            console.log("  FFmpeg done: " + (totalBytes / 1024).toFixed(0) + "KB, exit=" + execution.status);
+            if (execution.error || execution.status !== 0 || totalBytes === 0) {
+                var reason = execution.error ? execution.error.message : stderr.substring(0, 400);
+                console.error("  FFmpeg failed: " + reason);
+                callback("FFmpeg could not extract audio from " + clip.name + ": " + reason);
+                return;
+            }
 
-            proc.on("close", function (code) {
-                console.log("  FFmpeg done: " + (totalBytes / 1024).toFixed(0) + "KB, exit=" + code);
-                if (totalBytes === 0) {
-                    console.error("  FFmpeg stderr: " + stderr.substring(0, 400));
-                    callback("FFmpeg produced no audio output for " + clip.name + ". File may have no audio track.");
-                    return;
-                }
-                var combined = Buffer.concat(chunks);
-                var ab = combined.buffer.slice(combined.byteOffset, combined.byteOffset + combined.byteLength);
-                decodeArrayBuffer(ab, clip, callback);
-            });
+            var extractedClip = {};
+            for (var key in clip) {
+                if (clip.hasOwnProperty(key)) extractedClip[key] = clip[key];
+            }
+            extractedClip.inPointSeconds = 0;
+            extractedClip.outPointSeconds = clipDuration;
 
-            proc.on("error", function (err) {
-                console.error("  FFmpeg process error: " + err.message);
-                callback("FFmpeg error: " + err.message);
-            });
+            var ab = output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength);
+            decodeArrayBuffer(ab, extractedClip, callback);
         });
     }
 
@@ -601,44 +623,59 @@
         var cp = nr("child_process");
         var fs = nr("fs");
 
-        // Try PATH first
-        var whichCmd = isWin ? "where ffmpeg" : "which ffmpeg";
-        cp.exec(whichCmd, function (err, stdout) {
-            if (!err && stdout && stdout.trim()) {
-                var p = stdout.trim().split("\n")[0].trim();
-                console.log("  FFmpeg on PATH: " + p);
-                _ffmpegCache = p;
-                try { localStorage.setItem("deadair_ffmpeg", p); } catch (e) {}
-                callback(p);
-                return;
+        // CEP can strand callbacks from child_process.exec, so use the direct,
+        // bounded executable lookup instead of launching through a shell.
+        try {
+            var locator = isWin ? "where.exe" : "which";
+            var stdout = cp.execFileSync(locator, ["ffmpeg"], {
+                encoding: "utf8",
+                windowsHide: true,
+                timeout: 5000
+            });
+            if (stdout && stdout.trim()) {
+                var resolved = stdout.trim().split(/\r?\n/)[0].trim();
+                if (fs.existsSync(resolved)) {
+                    console.log("  FFmpeg on PATH: " + resolved);
+                    _ffmpegCache = resolved;
+                    try { localStorage.setItem("deadair_ffmpeg", resolved); } catch (e) {}
+                    callback(resolved);
+                    return;
+                }
             }
+        } catch (lookupError) {
+            console.warn("  FFmpeg PATH lookup failed: " + lookupError.message);
+        }
 
-            // Check common install locations
-            var paths = isWin ? [
-                "C:\\ffmpeg\\bin\\ffmpeg.exe",
-                "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
-                "C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe"
-            ] : [
-                "/usr/local/bin/ffmpeg",
-                "/opt/homebrew/bin/ffmpeg",
-                "/usr/bin/ffmpeg"
-            ];
+        // Check common install locations
+        var paths = isWin ? [
+            "C:\\ffmpeg\\bin\\ffmpeg.exe",
+            "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+            "C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe"
+        ] : [
+            "/usr/local/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/bin/ffmpeg"
+        ];
+        if (isWin) {
+            try {
+                paths.push(nr("path").join(process.env.LOCALAPPDATA, "Microsoft", "WinGet", "Links", "ffmpeg.exe"));
+            } catch (e) {}
+        }
 
-            for (var i = 0; i < paths.length; i++) {
-                try {
-                    if (fs.existsSync(paths[i])) {
-                        console.log("  FFmpeg found at: " + paths[i]);
-                        _ffmpegCache = paths[i];
-                        try { localStorage.setItem("deadair_ffmpeg", paths[i]); } catch (e) {}
-                        callback(paths[i]);
-                        return;
-                    }
-                } catch (e) {}
-            }
+        for (var i = 0; i < paths.length; i++) {
+            try {
+                if (fs.existsSync(paths[i])) {
+                    console.log("  FFmpeg found at: " + paths[i]);
+                    _ffmpegCache = paths[i];
+                    try { localStorage.setItem("deadair_ffmpeg", paths[i]); } catch (e) {}
+                    callback(paths[i]);
+                    return;
+                }
+            } catch (e) {}
+        }
 
-            console.warn("  FFmpeg not found in PATH or common locations");
-            callback(null);
-        });
+        console.warn("  FFmpeg not found in PATH or common locations");
+        callback(null);
     }
 
     function decodeArrayBuffer(ab, clip, callback) {
@@ -830,7 +867,10 @@
             dom.totalSilence.textContent = formatDuration(totalSilence) + " total";
             dom.results.classList.remove("hidden");
             dom.confirmActions.classList.remove("hidden");
-            showStatus("Found " + merged.length + " silent regions" + suffix + ". Ready to remove.", "success");
+            showStatus(
+                "Found " + merged.length + " silent regions" + suffix + ". Review the timeline action, then apply.",
+                "success"
+            );
         }, 200);
     }
 
@@ -858,7 +898,8 @@
             showStatus("No results. Run analysis first.", "error"); return;
         }
 
-        var mode        = document.querySelector('input[name="cut-mode"]:checked').value;
+        var mode = getSelectedMode();
+        var modeInfo = core.modeInfo(mode);
         var trackIndices = getSelectedTrackIndices();
         var esc = function (s) { return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"; };
         var regionsStr  = JSON.stringify(analysisResults.regions);
@@ -866,13 +907,15 @@
 
         dom.btnExecute.disabled = true;
         dom.btnCancel.disabled  = true;
-        showStatus("Applying to timeline...", "info");
+        showStatus(modeInfo.progress, "info");
 
         var call;
         if (mode === "markers") {
             call = "addSilenceMarkers(" + esc(regionsStr) + ")";
         } else if (mode === "disable") {
             call = "disableSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
+        } else if (mode === "lift") {
+            call = "liftDeleteSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
         } else {
             call = "rippleDeleteSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
         }
@@ -883,8 +926,7 @@
             var r = parseResp(resp);
             if (r && r.success) {
                 var count = r.data.markersAdded || r.data.disabledCount || r.data.deletedCount || 0;
-                var label = mode === "markers" ? "markers" : mode === "disable" ? "clips disabled" : "regions deleted";
-                showStatus(count + " " + label + ". Ctrl+Z to undo.", "success");
+                showStatus(count + " " + modeInfo.result + ". Ctrl+Z to undo.", "success");
                 cancelAnalysis();
             } else {
                 showStatus("Error: " + (r ? r.error : "Unknown"), "error");
@@ -923,7 +965,7 @@
                 threshold:   dom.threshold.value,
                 minDuration: dom.minDuration.value,
                 padding:     dom.padding.value,
-                cutMode:     document.querySelector('input[name="cut-mode"]:checked').value
+                cutMode:     getSelectedMode()
             }));
         } catch (e) {}
     }
@@ -933,7 +975,7 @@
             var raw = localStorage.getItem("deadair_settings");
             if (!raw) return;
             var s = JSON.parse(raw);
-            if (s.threshold)   { dom.threshold.value = s.threshold; dom.thresholdValue.textContent = s.threshold + " dB"; }
+            if (s.threshold)   setThreshold(s.threshold, false);
             if (s.minDuration) { dom.minDuration.value = s.minDuration; dom.durationValue.textContent = parseFloat(s.minDuration).toFixed(1) + "s"; }
             if (s.padding)     { dom.padding.value = s.padding; dom.paddingValue.textContent = s.padding + "ms"; }
             if (s.cutMode) {

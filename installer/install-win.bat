@@ -28,6 +28,7 @@ if errorlevel 1 (
 
 REM Enable unsigned extensions (CEP debug mode)
 echo [2/3] Enabling unsigned extensions...
+reg add "HKCU\SOFTWARE\Adobe\CSXS.13" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
 reg add "HKCU\SOFTWARE\Adobe\CSXS.12" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
 reg add "HKCU\SOFTWARE\Adobe\CSXS.11" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
 reg add "HKCU\SOFTWARE\Adobe\CSXS.10" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
@@ -39,7 +40,7 @@ where ffmpeg >nul 2>&1
 if errorlevel 1 (
     echo.
     echo [!] FFmpeg not found in PATH.
-    echo     DeadAir requires FFmpeg for audio analysis.
+    echo     Video clip analysis requires FFmpeg. Audio-only clips work without it.
     echo.
     echo     Options:
     echo     1. Download from https://ffmpeg.org/download.html

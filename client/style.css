@@ -124,6 +124,35 @@ body {
     gap: 6px;
 }
 
+.number-field {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 5px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-secondary);
+    font-size: 10px;
+}
+
+.number-field:focus-within {
+    border-color: var(--accent);
+}
+
+.number-field input {
+    width: 42px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    color: var(--accent);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: right;
+}
+
 .value {
     font-size: 11px;
     color: var(--accent);
@@ -154,6 +183,14 @@ body {
 .btn-auto:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+.range-scale {
+    display: flex;
+    justify-content: space-between;
+    margin-top: -1px;
+    color: var(--text-muted);
+    font-size: 9px;
 }
 
 /* Noise floor hint row */
@@ -217,30 +254,55 @@ select:focus {
     border-color: var(--accent);
 }
 
-/* Radio Buttons */
+/* Timeline action */
+.mode-fieldset {
+    min-width: 0;
+    border: 0;
+}
+
+.mode-fieldset legend {
+    margin-bottom: 5px;
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 500;
+}
+
 .radio-group {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding-left: 2px;
+    gap: 4px;
 }
 
 .radio-label {
+    position: relative;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
-    font-size: 11px;
+    padding: 6px 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
     color: var(--text-primary);
     cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.radio-label:hover {
+    background: var(--bg-tertiary);
+    border-color: #5a5a5a;
 }
 
 .radio-label input[type="radio"] {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
 }
 
 .radio-custom {
     width: 14px;
     height: 14px;
+    margin-top: 2px;
     border: 2px solid var(--border);
     border-radius: 50%;
     position: relative;
@@ -248,6 +310,7 @@ select:focus {
     transition: border-color 0.15s ease;
 }
 
+.radio-label input[type="radio"]:focus + .radio-custom,
 .radio-label input[type="radio"]:checked + .radio-custom {
     border-color: var(--accent);
 }
@@ -261,6 +324,28 @@ select:focus {
     height: 6px;
     background: var(--accent);
     border-radius: 50%;
+}
+
+.radio-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.radio-copy strong {
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.radio-copy small {
+    color: var(--text-secondary);
+    font-size: 9px;
+    line-height: 1.3;
+}
+
+.radio-label input[type="radio"]:checked ~ .radio-copy strong {
+    color: var(--accent);
 }
 
 /* Progress Bar */
