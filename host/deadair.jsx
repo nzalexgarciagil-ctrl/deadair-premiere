@@ -215,8 +215,19 @@ function disableSilentRegions(regionsStr, trackIndicesStr) {
 }
 
 // ============================================================
-// RIPPLE DELETE SILENT REGIONS
+// DELETE SILENT REGIONS
 // ============================================================
+
+function liftDeleteSilentRegions(regionsStr, trackIndicesStr) {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return error("No active sequence.");
+        var regions = jsonParse(regionsStr);
+        var trackIndices = jsonParse(trackIndicesStr);
+        var deletedCount = removeTimeRangesCore(seq, regions, trackIndices, "lift");
+        return result({ deletedCount: deletedCount });
+    } catch (e) { return error("liftDeleteSilentRegions: " + e.toString()); }
+}
 
 function rippleDeleteSilentRegions(regionsStr, trackIndicesStr) {
     try {
@@ -234,6 +245,10 @@ function rippleDeleteSilentRegions(regionsStr, trackIndicesStr) {
 // ============================================================
 
 function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
+    if (!ranges || ranges.length === 0) {
+        log("removeTimeRangesCore: no ranges, mode=" + mode);
+        return 0;
+    }
     log("removeTimeRangesCore: " + ranges.length + " ranges, mode=" + mode);
 
     // Sort and merge overlapping ranges
@@ -395,7 +410,7 @@ function removeTimeRangesCore(seq, ranges, trackIndices, mode) {
         return disabledCount;
     }
 
-    // ── RIPPLE MODE PHASE 1: collect all clip refs, then batch-remove ───────────
+    // ── DELETE MODES: collect all clip refs, then batch-remove ──────────────────
     // Single forward sweep — one sequence fetch, no inner retry loops.
     // remove(false,false) doesn't shift positions, so all refs captured up-front
     // stay valid even after earlier removes shift collection indices.

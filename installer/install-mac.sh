@@ -29,6 +29,7 @@ fi
 
 # Enable unsigned extensions
 echo "[2/3] Enabling unsigned extensions..."
+defaults write com.adobe.CSXS.13 PlayerDebugMode 1 2>/dev/null
 defaults write com.adobe.CSXS.12 PlayerDebugMode 1 2>/dev/null
 defaults write com.adobe.CSXS.11 PlayerDebugMode 1 2>/dev/null
 defaults write com.adobe.CSXS.10 PlayerDebugMode 1 2>/dev/null
@@ -39,7 +40,7 @@ echo "[3/3] Checking for FFmpeg..."
 if ! command -v ffmpeg &>/dev/null; then
     echo ""
     echo "[!] FFmpeg not found."
-    echo "    DeadAir requires FFmpeg for audio analysis."
+    echo "    Video clip analysis requires FFmpeg. Audio-only clips work without it."
     echo ""
     echo "    Install via Homebrew:"
     echo "    brew install ffmpeg"

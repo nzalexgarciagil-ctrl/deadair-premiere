@@ -4,17 +4,19 @@ Scrubbing through dead air by hand is one of those editing tasks that eats 20 mi
 
 ![DeadAir Demo](demo.gif)
 
-Point it at your timeline, set a threshold (or let it figure one out), and it cuts the gaps. Ripple delete, disable, or just drop markers if you want to review first. A/V sync works correctly across multiple tracks, which is where other tools tend to fall apart.
+Point it at your timeline, set a threshold (or let it figure one out), and it finds quiet regions from the audio waveform. Remove them and close the gaps, remove them while preserving timeline timing, disable them, or add markers for review. A/V sync stays aligned across multiple tracks.
+
+Premiere's built-in pause removal is transcript-based and is usually the right choice for spoken dialogue. DeadAir is for amplitude-based work: low-level noises, untranscribed audio, music or effects, isolated tracks, older Premiere versions, and workflows that need precise dB control.
 
 ---
 
 ## Features
 
-- Adjustable silence threshold (-60 dB to -10 dB)
+- Adjustable silence threshold (-100 dB to -10 dB), with slider and exact numeric input
 - Auto-detect threshold: samples up to 3 clips, figures out your noise floor vs. speech level, and picks a starting threshold for you
 - Minimum duration control (0.1 s to 5.0 s) so brief dips don't count
 - Padding (0-500 ms) to keep a buffer around speech
-- Three cut modes: Ripple Delete, Disable Clips, Markers Only
+- Four timeline actions: Close Gaps, Leave Gaps, Disable, and Markers Only
 - Analyze a specific audio track or all tracks at once
 - Settings persist between sessions
 - In-panel debug console so you can see exactly what's happening
@@ -42,7 +44,7 @@ Click **Auto** and DeadAir will:
 - Scan up to the first 3 clips (60 s each)
 - Build a histogram of per-window dB values
 - Set the 5th percentile as the noise floor and 70th percentile as the speech level
-- Suggest a threshold at `noise_floor + 30% x (speech - noise_floor)`, clamped to -55 dB to -15 dB
+- Suggest a threshold at `noise_floor + 30% x (speech - noise_floor)`, clamped to -95 dB to -15 dB
 
 It's a reasonable starting point. You'll probably still want to adjust it.
 
@@ -55,12 +57,19 @@ DeadAir works around this with two phases:
 **Phase 1 - remove without ripple**
 - Razors all clips at silence boundaries across all tracks simultaneously (via QE DOM)
 - Collects references to every resulting silence clip
-- Calls `clip.remove(false, false)` on all of them at once, which removes clips without shifting positions and leaves exact-size gaps
+- Calls the documented `clip.remove(false, false)` API on all of them at once, which removes clips without shifting positions and leaves exact-size gaps
+- **Leave Gaps** stops here, preserving every later clip's timeline position
 
 **Phase 2 - cursor sweep**
 - For each track, snapshots all remaining clip positions and sorts left-to-right
 - Walks a cursor from time 0 and moves clips left whenever it finds a gap larger than `0.4 / fps`
 - Because audio and video clips were removed at identical positions, the same math per-track produces identical offsets, so A/V sync is preserved
+
+### Leave Gaps mode
+
+- Uses the same synchronized razor and batch-removal pass as Ripple Delete
+- Does not run the gap-closing cursor sweep
+- Preserves deliberate timing and gives you empty timeline regions to fill or review
 
 ### Disable mode
 
@@ -135,9 +144,9 @@ The script copies the extension, sets the debug mode registry keys, and checks f
    - macOS: `~/Library/Application Support/Adobe/CEP/extensions/`
 
 3. Enable unsigned extensions:
-   - Windows: set `HKEY_CURRENT_USER\SOFTWARE\Adobe\CSXS.12` > `PlayerDebugMode = 1`
-   - macOS: `defaults write com.adobe.CSXS.12 PlayerDebugMode 1`
-   - Repeat for CSXS.11, CSXS.10, CSXS.9 if you need older Premiere versions.
+   - Windows: set `HKEY_CURRENT_USER\SOFTWARE\Adobe\CSXS.13` > `PlayerDebugMode = 1`
+   - macOS: `defaults write com.adobe.CSXS.13 PlayerDebugMode 1`
+   - Repeat for CSXS.12, CSXS.11, CSXS.10, and CSXS.9 when using older Premiere versions.
 
 4. (Video clips only) Install FFmpeg:
    - Windows: `winget install ffmpeg`
@@ -154,18 +163,23 @@ The script copies the extension, sets the debug mode registry keys, and checks f
 - Rough presets to start from:
   - Talking head / interview: -35 dB, 0.8 s, 100 ms padding
   - Podcast: -40 dB, 1.0 s, 150 ms padding
+  - Low-level noise cleanup: -70 dB, 0.2 s, 20 ms padding
   - Vlog / fast-paced: -30 dB, 0.5 s, 50 ms padding
-- Save your project before running Ripple Delete.
+- Use **Leave Gaps** when timing must not shift.
+- Save your project before running either removal action.
 - If something looks wrong, open the Debug Log from the footer. Every clip load, scan, and ExtendScript call is logged there.
 
 ---
 
 ## Building from source
 
-No build step. It's plain HTML/CSS/JS and ExtendScript JSX.
+The extension has no build step. It is plain HTML/CSS/JS and ExtendScript JSX. Source validation and regression tests use Node.js and pnpm.
 
 ```bash
 git clone https://github.com/nzalexgarciagil-ctrl/deadair-premiere.git
+
+pnpm install
+pnpm validate
 
 # Copy to your CEP extensions folder and enable debug mode (see Installation)
 # Edit client/ and host/ directly, changes show up on panel reload
