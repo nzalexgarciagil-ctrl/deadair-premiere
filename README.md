@@ -1,218 +1,104 @@
-# DeadAir - Silence Remover for Premiere Pro
+# DeadAir for Premiere Pro
 
-Scrubbing through dead air by hand is one of those editing tasks that eats 20 minutes a session and feels like it should've been automated years ago. DeadAir is a free Premiere panel that does it for you. No subscription, no account, nothing outside Premiere.
+DeadAir finds quiet sections in your audio and lets you remove, disable or mark them in Premiere Pro. It is free and open source. No account or subscription is needed.
 
-![DeadAir Demo](demo.gif)
+Detection uses audio levels, not a transcript. Use it when you need a specific dB threshold or want to analyze one audio track. For spoken pauses detected from a transcript, Premiere's built-in Text-Based Editing may be a better fit.
 
-Point it at your timeline, set a threshold (or let it figure one out), and it finds quiet regions from the audio waveform. Remove them and close the gaps, remove them while preserving timeline timing, disable them, or add markers for review. A/V sync stays aligned across multiple tracks.
+**Start with markers on a duplicate sequence.** Clip-editing actions affect all video and audio tracks. Close gaps also removes existing gaps, which can change intended timing and A/V sync.
 
-Premiere's built-in pause removal is transcript-based and is usually the right choice for spoken dialogue. DeadAir is for amplitude-based work: low-level noises, untranscribed audio, music or effects, isolated tracks, older Premiere versions, and workflows that need precise dB control.
+## Install
 
----
+The extension targets Premiere Pro 2019 and later on Windows and macOS through Adobe CEP. That version range is not a tested compatibility guarantee. Timeline editing uses Premiere's undocumented QE API, so behavior can vary by version.
 
-## Features
+1. From this repository's **Code** menu, choose **Download ZIP**, then extract it. You do not need a published release to install.
+2. Close Premiere and run the installer from the extracted folder:
+   - **Windows:** double-click `installer/install-win.bat`.
+   - **macOS:** open Terminal in the extracted folder and run `bash installer/install-mac.sh`.
+3. Restart Premiere. Open **Window > Extensions > DeadAir - Silence Remover**.
 
-- Adjustable silence threshold (-100 dB to -10 dB), with slider and exact numeric input
-- Auto-detect threshold: samples up to 3 clips, figures out your noise floor vs. speech level, and picks a starting threshold for you
-- Minimum duration control (0.1 s to 5.0 s) so brief dips don't count
-- Padding (0-500 ms) to keep a buffer around speech
-- Four timeline actions: Close Gaps, Leave Gaps, Disable, and Markers Only
-- Analyze a specific audio track or all tracks at once
-- Settings persist between sessions
-- In-panel debug console so you can see exactly what's happening
+The installers replace an existing DeadAir installation and enable unsigned CEP extensions for the current user. Review the scripts before running them. They do not install FFmpeg or change your project.
 
-Works with Premiere Pro 2019+ (v13.0 and up, Windows and macOS).
+### When you need FFmpeg
 
----
+Video files and audio files of 150 MB or more need [FFmpeg](https://ffmpeg.org/download.html). Smaller audio files can load directly when Premiere's panel supports their codec.
 
-## How it works
+- **Windows:** install FFmpeg and put the folder containing `ffmpeg.exe` on your PATH.
+- **macOS:** run `brew install ffmpeg` if you use Homebrew.
 
-### Audio analysis
+Restart Premiere after installing FFmpeg. Some codecs may still be unsupported. Check **Help and troubleshooting** in the panel if a clip is skipped.
 
-DeadAir reads audio directly inside the browser panel using the Web Audio API, no plugins needed:
+### Manual installation
 
-1. Audio-only clips (WAV, MP3, AIFF, AAC) under 150 MB are loaded directly via the Node.js `fs` module.
-2. Video clips (MOV, MP4, MXF, R3D, BRAW, etc.) get their audio extracted by FFmpeg into an in-memory mono 22 050 Hz WAV pipe. No temp files.
-3. The raw PCM is decoded with `AudioContext.decodeAudioData()`.
-4. Silence detection scans 50 ms windows, takes the peak amplitude in each, and compares it against your threshold.
+Create a folder named `com.deadair.silenceremover` in your CEP extensions directory:
 
-FFmpeg is optional. Pure audio projects work without it.
+- **Windows:** `%APPDATA%\Adobe\CEP\extensions\`
+- **macOS:** `~/Library/Application Support/Adobe/CEP/extensions/`
 
-### Auto-detect threshold
+Copy the extracted extension files into that folder. The `CSXS`, `client`, `host` and `bin` folders must sit directly inside it, not inside another extracted folder.
 
-Click **Auto** and DeadAir will:
-- Scan up to the first 3 clips (60 s each)
-- Build a histogram of per-window dB values
-- Set the 5th percentile as the noise floor and 70th percentile as the speech level
-- Suggest a threshold at `noise_floor + 30% x (speech - noise_floor)`, clamped to -95 dB to -15 dB
+Enable unsigned extensions for your CEP runtime. The installers set `PlayerDebugMode` to `1` for CSXS versions 9 through 13. For CSXS 13, set the Windows string value at `HKEY_CURRENT_USER\SOFTWARE\Adobe\CSXS.13`, or run `defaults write com.adobe.CSXS.13 PlayerDebugMode 1` on macOS. Older runtimes need the matching version number.
 
-It's a reasonable starting point. You'll probably still want to adjust it.
+Restart Premiere and open the extension. If it does not appear, check the folder structure and the debug-mode setting for your Premiere version.
 
-### Ripple Delete - why it's a two-phase process
+## First run
 
-Premiere's built-in ripple delete shifts clip positions after every removal. On a single track that's fine. With multiple tracks it causes A/V desync because each track shifts independently.
+1. Duplicate your sequence and open the copy. Choose **Refresh** in DeadAir to see the active sequence.
+2. Under **Analyze audio from**, choose the track with your dialogue. This selects the audio used for detection, not the tracks that an edit will affect.
+3. Choose **Estimate threshold**, or enter a threshold yourself. Adjust **Minimum quiet time** and **Keep around speech** if needed.
+4. Choose **Find quiet sections**. The panel shows detected regions and their total duration.
+5. Select a region and choose **Show in timeline**. Play the sequence in Premiere to listen. The highlighted overview shows region positions, not an audio waveform.
+6. Leave **Markers only** selected and choose **Add silence markers**. Your clips stay unchanged.
 
-DeadAir works around this with two phases:
+Each analysis starts in marker mode. To edit clips, review the affected tracks, choose another action and confirm that you saved a sequence copy. Changing detection settings clears the results. If you edit the timeline, analyze again before applying an action.
 
-**Phase 1 - remove without ripple**
-- Razors all clips at silence boundaries across all tracks simultaneously (via QE DOM)
-- Collects references to every resulting silence clip
-- Calls the documented `clip.remove(false, false)` API on all of them at once, which removes clips without shifting positions and leaves exact-size gaps
-- **Leave Gaps** stops here, preserving every later clip's timeline position
+## Detection settings
 
-**Phase 2 - cursor sweep**
-- For each track, snapshots all remaining clip positions and sorts left-to-right
-- Walks a cursor from time 0 and moves clips left whenever it finds a gap larger than `0.4 / fps`
-- Because audio and video clips were removed at identical positions, the same math per-track produces identical offsets, so A/V sync is preserved
+- **Silence threshold:** audio below this level counts as quiet. The range is -100 to -10 dB. A higher value detects more audio as quiet.
+- **Estimate threshold:** samples up to three clips and suggests a starting value. It does not know which audio you want to keep.
+- **Minimum quiet time:** ignores quiet sections shorter than the selected duration, from 0.1 to 5 seconds.
+- **Keep around speech:** retains 0 to 500 ms at each edge of a detected quiet section. This is the padding around speech.
 
-### Leave Gaps mode
+The default settings are -35 dB, 0.8 seconds and 100 ms. Review the result rather than treating these as a preset for every recording.
 
-- Uses the same synchronized razor and batch-removal pass as Ripple Delete
-- Does not run the gap-closing cursor sweep
-- Preserves deliberate timing and gives you empty timeline regions to fill or review
+## Timeline actions
 
-### Disable mode
+- **Markers only:** adds sequence markers named “Silence”. No clips change.
+- **Disable sections:** splits clips and disables the quiet pieces. Their positions stay unchanged.
+- **Remove and leave gaps:** deletes quiet pieces without moving later clips.
+- **Remove and close gaps:** deletes quiet pieces, then closes gaps on each track, including gaps that existed before analysis.
 
-- Same QE DOM razor pass to split at silence boundaries
-- Collects clip refs where the midpoint falls inside a silence range
-- Sets `clip.disabled = true` in a batch, fully reversible
+Detection settings persist between sessions. A clip-editing action is not remembered as the default.
 
-### Markers mode
+## Limitations to check before editing
 
-- Skips the razor entirely
-- Creates sequence span markers named "Silence" for every detected region
-- Use **Clear Markers** in the footer when you're done reviewing
+- **All audio tracks combines quiet regions from any selected track.** It does not require every track to be quiet at the same time. Another track may contain speech during a detected region. Prefer a single reference track and review the result.
+- **Clip edits affect all video and audio tracks.** Selecting one analysis track does not isolate edits to that track.
+- **Close gaps can change A/V sync on tracks with different layouts.** Do not use it on a sequence with deliberate offsets or gaps unless you are working on a copy and can inspect every change.
+- **Existing results do not track timeline edits.** Refresh or analyze again after changing clips. Switching to a different sequence blocks preview and apply until you analyze that sequence.
+- **Clear markers removes every marker named “Silence”.** That includes markers created outside DeadAir. The panel asks before removing them.
+- **A skipped clip means incomplete analysis.** Check the warning and debug log before editing. Large-file extraction can block the panel until the current clip finishes.
 
----
+Undo behavior and clip-editing results need checking in your Premiere version. Keep a sequence copy rather than relying on a single undo step.
 
-## Performance
+## Troubleshooting
 
-Measured on a 3-minute talking-head clip, 5 tracks, ~80 silence regions:
+Open **Help and troubleshooting** in the panel. Check that the source media is online and FFmpeg is available when needed. The debug log records file loads and Premiere calls. It includes local file paths, so review the contents before sharing it.
 
-| Step | Time |
-|------|------|
-| Audio analysis | ~2 s |
-| Razor (QE DOM) | ~10 s |
-| Batch remove + gap sweep | ~8 s |
-| Disable mode | ~8 s |
-| Markers only | ~3 s |
+If you report a problem, include your OS, Premiere version, file format, selected action and steps to reproduce it. State whether the problem happens with markers only or only when editing clips.
 
----
+## Develop and contribute
 
-## Comparison
-
-| Feature | DeadAir | AutoCut | TimeBolt | Manual |
-|---------|---------|---------|----------|--------|
-| Price | **Free** | $15/mo | $200/yr | Free |
-| Open source | **Yes** | No | No | N/A |
-| Auto threshold | **Yes** | No | No | N/A |
-| Adjustable threshold | Yes | Yes | Yes | N/A |
-| Padding control | Yes | Yes | Yes | N/A |
-| Ripple delete | Yes | Yes | Yes | Yes |
-| Non-destructive mode | **Yes** | No | No | Yes |
-| Markers mode | **Yes** | No | No | Yes |
-| A/V sync | **Yes** | Partial | Yes | Yes |
-| FFmpeg required | Optional | No | No | No |
-| Premiere version | 2019+ | 2020+ | Standalone | Any |
-
----
-
-## Requirements
-
-- Adobe Premiere Pro 2019 or later (v13.0+)
-- Windows 10+ or macOS 10.14+
-- [FFmpeg](https://ffmpeg.org/download.html) - optional, only needed for video clip files (MOV, MP4, MXF, etc.)
-
----
-
-## Installation
-
-### Automatic (recommended)
-
-**Windows:** double-click `installer/install-win.bat`
-
-**macOS:** run `bash installer/install-mac.sh` in terminal
-
-The script copies the extension, sets the debug mode registry keys, and checks for FFmpeg.
-
-### Manual
-
-1. Download and extract the release ZIP.
-
-2. Copy the `com.deadair.silenceremover` folder to:
-   - Windows: `%APPDATA%\Adobe\CEP\extensions\`
-   - macOS: `~/Library/Application Support/Adobe/CEP/extensions/`
-
-3. Enable unsigned extensions:
-   - Windows: set `HKEY_CURRENT_USER\SOFTWARE\Adobe\CSXS.13` > `PlayerDebugMode = 1`
-   - macOS: `defaults write com.adobe.CSXS.13 PlayerDebugMode 1`
-   - Repeat for CSXS.12, CSXS.11, CSXS.10, and CSXS.9 when using older Premiere versions.
-
-4. (Video clips only) Install FFmpeg:
-   - Windows: `winget install ffmpeg`
-   - macOS: `brew install ffmpeg`
-
-5. Restart Premiere Pro, go to Window > Extensions > DeadAir - Silence Remover.
-
----
-
-## Usage tips
-
-- Run **Auto** before anything else. It takes a few seconds and gets the threshold in the right ballpark.
-- Use **Markers Only** first to see what's going to be cut before you commit to a ripple delete.
-- Rough presets to start from:
-  - Talking head / interview: -35 dB, 0.8 s, 100 ms padding
-  - Podcast: -40 dB, 1.0 s, 150 ms padding
-  - Low-level noise cleanup: -70 dB, 0.2 s, 20 ms padding
-  - Vlog / fast-paced: -30 dB, 0.5 s, 50 ms padding
-- Use **Leave Gaps** when timing must not shift.
-- Save your project before running either removal action.
-- If something looks wrong, open the Debug Log from the footer. Every clip load, scan, and ExtendScript call is logged there.
-
----
-
-## Building from source
-
-The extension has no build step. It is plain HTML/CSS/JS and ExtendScript JSX. Source validation and regression tests use Node.js and pnpm.
+The panel uses plain HTML, CSS and JavaScript with an ExtendScript backend. There is no build step. Validation uses Node.js 20 or later and pnpm.
 
 ```bash
-git clone https://github.com/nzalexgarciagil-ctrl/deadair-premiere.git
-
+git clone https://github.com/Alx8g/deadair-premiere.git
+cd deadair-premiere
 pnpm install
 pnpm validate
-
-# Copy to your CEP extensions folder and enable debug mode (see Installation)
-# Edit client/ and host/ directly, changes show up on panel reload
 ```
 
----
-
-## Contributing
-
-1. Fork the repo
-2. Create a branch (`git checkout -b feature/my-feature`)
-3. Commit (`git commit -m 'feat: add my feature'`)
-4. Push and open a PR
-
----
+Read the [developer guide](docs/README.md) for the analysis flow, test boundaries and release packaging. Make changes on a branch and open a pull request with the behavior changed and the checks you ran. Do not describe mocked tests as proof of Premiere compatibility.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
-
----
-
-## Technical stack
-
-| Layer | Technology |
-|-------|-----------|
-| Extension framework | Adobe CEP 9 (CSXS 9.0) |
-| Panel UI | HTML/CSS/JavaScript (vanilla) |
-| Audio analysis | Web Audio API (`AudioContext.decodeAudioData`) |
-| Audio extraction | FFmpeg (optional, piped to stdout, no temp files) |
-| Timeline operations | ExtendScript (ES3) + QE DOM |
-| Cut method | `qeSeq.razor(TC)`, auto-discovers working method at runtime |
-| Gap closing | `clip.move(delta)` cursor sweep |
-| Disable | `clip.disabled = true` batch |
-| Markers | `seq.markers.createMarker()` + `marker.duration` |
-| Settings | `localStorage` |
+[MIT](LICENSE).

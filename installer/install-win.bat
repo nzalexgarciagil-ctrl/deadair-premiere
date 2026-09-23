@@ -21,7 +21,7 @@ echo [1/3] Installing extension files...
 xcopy /s /e /i /q "%~dp0.." "%EXT_DIR%" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Failed to copy extension files.
-    echo         Try running as Administrator.
+    echo         Close Premiere and check that your user can write to the CEP extensions folder.
     pause
     exit /b 1
 )
@@ -40,12 +40,13 @@ where ffmpeg >nul 2>&1
 if errorlevel 1 (
     echo.
     echo [!] FFmpeg not found in PATH.
-    echo     Video clip analysis requires FFmpeg. Audio-only clips work without it.
+    echo     Video files and audio files of 150 MB or more need FFmpeg.
+    echo     Smaller audio files can load directly when their codec is supported.
     echo.
     echo     Options:
     echo     1. Download from https://ffmpeg.org/download.html
     echo     2. Install via: winget install ffmpeg
-    echo     3. Place ffmpeg.exe in the extension's bin\ folder
+    echo     Put the folder containing ffmpeg.exe on PATH, then restart Premiere.
     echo.
 ) else (
     echo     FFmpeg found.

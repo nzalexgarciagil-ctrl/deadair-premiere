@@ -18,10 +18,12 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           ZIP_NAME="deadair-premiere-${VERSION}.zip"
-          zip -r "$ZIP_NAME" . \
-            -x ".git/*" \
-            -x ".github/*" \
-            -x "*.zip"
+          STAGING="$RUNNER_TEMP/deadair-release"
+          EXTENSION="$STAGING/com.deadair.silenceremover"
+          mkdir -p "$EXTENSION"
+          cp -R CSXS client host bin installer docs "$EXTENSION/"
+          cp README.md LICENSE "$EXTENSION/"
+          (cd "$STAGING" && zip -r "$GITHUB_WORKSPACE/$ZIP_NAME" com.deadair.silenceremover)
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
@@ -33,12 +35,13 @@ jobs:
           body: |
             ## Installation
 
-            1. Download `${{ env.ZIP_NAME }}` below
-            2. Extract to your CEP extensions folder:
-               - **Windows:** `%APPDATA%\Adobe\CEP\extensions\com.deadair.silenceremover\`
-               - **macOS:** `~/Library/Application Support/Adobe/CEP/extensions/com.deadair.silenceremover/`
-            3. Enable unsigned extensions (see README)
-            4. Restart Premiere Pro
-            5. Window > Extensions > DeadAir - Silence Remover
+            1. Download and extract `${{ env.ZIP_NAME }}`.
+            2. Close Premiere. Open the extracted `com.deadair.silenceremover` folder.
+            3. On Windows, run `installer/install-win.bat`. On macOS, run `bash installer/install-mac.sh`.
+            4. Restart Premiere. Open **Window > Extensions > DeadAir - Silence Remover**.
 
-            **Requires:** FFmpeg installed and in PATH
+            The installers replace an existing DeadAir installation and enable unsigned CEP extensions for your user. Review the README before installing manually.
+
+            Video files and audio files of 150 MB or more need FFmpeg. Smaller audio files can load directly when their codec is supported.
+
+            Start with markers on a duplicate sequence. Clip edits affect all video and audio tracks. Close gaps also removes existing gaps and can change A/V sync.

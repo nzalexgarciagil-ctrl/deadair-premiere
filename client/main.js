@@ -1,6 +1,6 @@
 /**
  * DeadAir - Silence Remover for Adobe Premiere Pro
- * Frontend controller — Web Audio API analysis, no FFmpeg required.
+ * Frontend controller. Web Audio analysis with FFmpeg extraction when needed.
  */
 
 (function () {
@@ -12,6 +12,8 @@
     var cs = new CSInterface();
     var analysisResults = null;
     var lastLoadedClips = null;
+    var busy = false;
+    var selectedRegion = 0;
 
     // ============================================================
     // IN-PANEL DEBUG CONSOLE
@@ -58,6 +60,8 @@
         document.getElementById("btn-toggle-log").addEventListener("click", function () {
             var panel = document.getElementById("debug-panel");
             panel.classList.toggle("hidden");
+            this.setAttribute("aria-expanded", String(!panel.classList.contains("hidden")));
+            this.textContent = panel.classList.contains("hidden") ? "Show debug log" : "Hide debug log";
         });
 
         document.getElementById("btn-clear-log").addEventListener("click", function () {
@@ -68,9 +72,11 @@
             var lines = _logEl.querySelectorAll(".log-line");
             var text = Array.prototype.map.call(lines, function (l) { return l.textContent; }).join("\n");
             if (!text) { return; }
-            navigator.clipboard.writeText(text).then(function () {
+            var copy = navigator.clipboard && navigator.clipboard.writeText
+                ? navigator.clipboard.writeText(text) : Promise.reject(new Error("Clipboard unavailable"));
+            copy.then(function () {
                 var btn = document.getElementById("btn-copy-log");
-                btn.textContent = "Copied!";
+                btn.textContent = "Copied";
                 setTimeout(function () { btn.textContent = "Copy"; }, 1500);
             }).catch(function () {
                 // Fallback for older CEP
@@ -83,7 +89,7 @@
                 document.execCommand("copy");
                 document.body.removeChild(ta);
                 var btn = document.getElementById("btn-copy-log");
-                btn.textContent = "Copied!";
+                btn.textContent = "Copied";
                 setTimeout(function () { btn.textContent = "Copy"; }, 1500);
             });
         });
@@ -105,9 +111,9 @@
         threshold:        document.getElementById("threshold"),
         thresholdNumber:  document.getElementById("threshold-number"),
         minDuration:      document.getElementById("min-duration"),
-        durationValue:    document.getElementById("duration-value"),
+        durationNumber:   document.getElementById("duration-number"),
         padding:          document.getElementById("padding"),
-        paddingValue:     document.getElementById("padding-value"),
+        paddingNumber:    document.getElementById("padding-number"),
         trackSelect:      document.getElementById("track-select"),
         btnAnalyze:       document.getElementById("btn-analyze"),
         btnAuto:          document.getElementById("btn-auto"),
@@ -123,7 +129,22 @@
         totalSilence:     document.getElementById("total-silence"),
         noiseHint:        document.getElementById("noise-hint"),
         noiseFloorLabel:  document.getElementById("noise-floor-label"),
-        speechLevelLabel: document.getElementById("speech-level-label")
+        speechLevelLabel: document.getElementById("speech-level-label"),
+        sequenceName:     document.getElementById("sequence-name"),
+        sequenceDetail:   document.getElementById("sequence-detail"),
+        btnRefresh:       document.getElementById("btn-refresh"),
+        multiTrackWarning: document.getElementById("multi-track-warning"),
+        analysisSummary:  document.getElementById("analysis-summary"),
+        regionSelect:     document.getElementById("region-select"),
+        regionMap:        document.getElementById("region-map"),
+        btnPrevious:      document.getElementById("btn-previous"),
+        btnNext:          document.getElementById("btn-next"),
+        btnPreview:       document.getElementById("btn-preview"),
+        affectedTracks:   document.getElementById("affected-tracks"),
+        timingSummary:    document.getElementById("timing-summary"),
+        editWarning:      document.getElementById("edit-warning"),
+        editAcknowledgement: document.getElementById("edit-acknowledgement"),
+        confirmEdit:      document.getElementById("confirm-edit")
     };
 
     // ============================================================
@@ -147,24 +168,57 @@
         var normalized = core.normalizeThreshold(value);
         dom.threshold.value = normalized;
         dom.thresholdNumber.value = normalized;
-        if (persist) saveSettings();
+        if (persist) detectionChanged();
     }
 
     function bindSliders() {
-        dom.threshold.addEventListener("input", function () {
-            setThreshold(this.value, true);
+        dom.threshold.addEventListener("input", function () { setThreshold(this.value, true); });
+        dom.thresholdNumber.addEventListener("change", function () { setThreshold(this.value, true); });
+        function bindPair(slider, number, min, max, step, fallback) {
+            function update(value) {
+                var normalized = core.normalizeSetting(value, min, max, step, fallback);
+                slider.value = normalized;
+                number.value = normalized;
+                detectionChanged();
+            }
+            slider.addEventListener("input", function () { update(this.value); });
+            number.addEventListener("change", function () { update(this.value); });
+        }
+        bindPair(dom.minDuration, dom.durationNumber, 0.1, 5, 0.1, 0.8);
+        bindPair(dom.padding, dom.paddingNumber, 0, 500, 10, 100);
+        dom.trackSelect.addEventListener("change", function () {
+            detectionChanged();
+            updateSourceWarning();
         });
-        dom.thresholdNumber.addEventListener("change", function () {
-            setThreshold(this.value, true);
-        });
-        dom.minDuration.addEventListener("input", function () {
-            dom.durationValue.textContent = parseFloat(this.value).toFixed(1) + "s";
-            saveSettings();
-        });
-        dom.padding.addEventListener("input", function () {
-            dom.paddingValue.textContent = this.value + "ms";
-            saveSettings();
-        });
+    }
+
+    function detectionChanged() {
+        var hadResults = !!analysisResults;
+        cancelAnalysis();
+        lastLoadedClips = null;
+        dom.noiseHint.classList.add("hidden");
+        saveSettings();
+        if (hadResults) showStatus("Detection changed. Find quiet sections again before applying an action.", "info");
+    }
+
+    function setBusy(value) {
+        busy = value;
+        var controls = document.querySelectorAll("button, input, select");
+        for (var i = 0; i < controls.length; i++) controls[i].disabled = value;
+        if (!value) {
+            var ready = !!seqSettings && seqSettings.audioTracks.some(function (track) { return track.clipCount > 0; });
+            dom.btnAnalyze.disabled = !ready;
+            dom.btnAuto.disabled = !ready;
+            dom.trackSelect.disabled = !ready;
+            dom.btnClearMarkers.disabled = !seqSettings;
+            updateModeUi();
+            updateRegionPreview();
+        }
+        document.getElementById("panel-content").setAttribute("aria-busy", String(value));
+    }
+
+    function updateSourceWarning() {
+        dom.multiTrackWarning.classList.toggle("hidden", dom.trackSelect.value !== "all" || !seqSettings || seqSettings.audioTracks.length < 2);
     }
 
     // ============================================================
@@ -175,14 +229,26 @@
         dom.btnAnalyze.addEventListener("click", startAnalysis);
         dom.btnAuto.addEventListener("click", runAutoDetect);
         dom.btnExecute.addEventListener("click", executeRemoval);
-        dom.btnCancel.addEventListener("click", cancelAnalysis);
+        dom.btnCancel.addEventListener("click", function () {
+            cancelAnalysis();
+            showStatus("Results cleared. No clips changed.", "info");
+            dom.btnAnalyze.focus();
+        });
         dom.btnClearMarkers.addEventListener("click", clearMarkers);
-
+        dom.btnRefresh.addEventListener("click", function () { refreshTrackList(); });
+        dom.confirmEdit.addEventListener("change", updateModeUi);
+        dom.regionSelect.addEventListener("change", function () {
+            selectedRegion = parseInt(this.value, 10);
+            updateRegionPreview();
+        });
+        dom.btnPrevious.addEventListener("click", function () { selectedRegion--; updateRegionPreview(); });
+        dom.btnNext.addEventListener("click", function () { selectedRegion++; updateRegionPreview(); });
+        dom.btnPreview.addEventListener("click", previewRegion);
         var modes = document.querySelectorAll('input[name="cut-mode"]');
         for (var i = 0; i < modes.length; i++) {
             modes[i].addEventListener("change", function () {
+                dom.confirmEdit.checked = false;
                 updateModeUi();
-                saveSettings();
             });
         }
     }
@@ -192,7 +258,60 @@
     }
 
     function updateModeUi() {
-        dom.btnExecute.textContent = core.modeInfo(getSelectedMode()).button;
+        var mode = getSelectedMode();
+        var editsClips = mode !== "markers";
+        dom.btnExecute.textContent = core.modeInfo(mode).button;
+        dom.btnExecute.disabled = busy || !analysisResults || (editsClips && !dom.confirmEdit.checked);
+        dom.editAcknowledgement.classList.toggle("hidden", !editsClips);
+        dom.editWarning.classList.toggle("hidden", !editsClips);
+        dom.affectedTracks.textContent = core.affectedTracksText(mode, seqSettings);
+        dom.timingSummary.textContent = core.timingText(mode, analysisResults ? analysisResults.totalSilence : 0);
+        dom.editWarning.textContent = mode === "ripple"
+            ? "Close gaps also removes existing gaps on each track. This can change intended timing and A/V sync. Use a duplicate sequence, or choose Markers only."
+            : "This changes clips on all video and audio tracks, not just the audio source selected above. Save a copy of the sequence first.";
+    }
+
+    function updateRegionPreview() {
+        var regions = analysisResults ? analysisResults.regions : [];
+        selectedRegion = Math.max(0, Math.min(selectedRegion, regions.length - 1));
+        dom.regionSelect.value = String(selectedRegion);
+        dom.btnPrevious.disabled = busy || selectedRegion === 0;
+        dom.btnNext.disabled = busy || selectedRegion >= regions.length - 1;
+        dom.btnPreview.disabled = busy || !regions.length;
+        var spans = dom.regionMap.children;
+        for (var i = 0; i < spans.length; i++) spans[i].className = i === selectedRegion ? "selected" : "";
+        if (regions.length) dom.regionMap.setAttribute("aria-label", "Region " + (selectedRegion + 1) + " of " + regions.length + ". " + core.regionLabel(regions[selectedRegion]));
+    }
+
+    function renderRegions() {
+        dom.regionSelect.innerHTML = "";
+        dom.regionMap.innerHTML = "";
+        var regions = analysisResults.regions;
+        var duration = Math.max(seqSettings.durationSecs || 0, regions[regions.length - 1].end);
+        for (var i = 0; i < regions.length; i++) {
+            var option = document.createElement("option");
+            option.value = String(i);
+            option.textContent = (i + 1) + ". " + core.regionLabel(regions[i]);
+            dom.regionSelect.appendChild(option);
+            var span = document.createElement("span");
+            span.style.left = (regions[i].start / duration * 100) + "%";
+            span.style.width = ((regions[i].end - regions[i].start) / duration * 100) + "%";
+            dom.regionMap.appendChild(span);
+        }
+        selectedRegion = 0;
+        updateRegionPreview();
+    }
+
+    function previewRegion() {
+        if (busy || !analysisResults) return;
+        var region = analysisResults.regions[selectedRegion];
+        setBusy(true);
+        evalScript("previewSilenceRegion(" + JSON.stringify(analysisResults.sequenceID) + "," + region.start + ")", function (resp) {
+            setBusy(false);
+            var r = parseResp(resp);
+            if (r && r.success) showStatus("Playhead at " + core.formatPosition(region.start) + ". Press Play in Premiere to listen.", "info");
+            else showStatus(r ? r.error : "Premiere did not respond. Refresh the source and try again.", "error");
+        });
     }
 
     // ============================================================
@@ -201,48 +320,44 @@
 
     var seqSettings = null; // populated by refreshTrackList, used throughout
 
-    function refreshTrackList() {
-        console.log("Fetching sequence info...");
+    function refreshTrackList(callback) {
+        if (busy) return;
+        cancelAnalysis();
+        lastLoadedClips = null;
+        setBusy(true);
         evalScript("getSequenceInfo()", function (resp) {
             var r = parseResp(resp);
             if (!r || !r.success) {
-                console.warn("No active sequence or evalScript error: " + resp);
-                showStatus("Open a sequence to begin.", "info");
+                seqSettings = null;
+                dom.sequenceName.textContent = "No active sequence";
+                dom.sequenceDetail.textContent = "Open a sequence in Premiere, then choose Refresh.";
+                dom.trackSelect.innerHTML = '<option value="all">All audio tracks</option>';
+                updateSourceWarning();
+                setBusy(false);
+                showStatus(r ? r.error : "Cannot connect to Premiere. Reopen the panel and try again.", "error");
+                if (callback) callback(false);
                 return;
             }
-
             seqSettings = r.data;
-
-            var fpsStr  = seqSettings.fps ? seqSettings.fps.toFixed(2) + " fps" : "? fps";
-            var sizeStr = (seqSettings.width && seqSettings.height)
-                ? seqSettings.width + "x" + seqSettings.height
-                : "?x?";
-            var durStr  = seqSettings.durationSecs
-                ? (seqSettings.durationSecs / 60).toFixed(1) + " min"
-                : "";
-
-            console.log("Sequence: " + seqSettings.name
-                + " | " + fpsStr
-                + " | " + sizeStr
-                + (durStr ? " | " + durStr : "")
-                + " | Audio tracks: " + seqSettings.audioTracks.length);
-
-            for (var i = 0; i < seqSettings.audioTracks.length; i++) {
-                var t = seqSettings.audioTracks[i];
-                console.log("  Track " + t.index + ": " + t.name + " (" + t.clipCount + " clips)");
-            }
-
-            hideStatus();
+            var previous = dom.trackSelect.value;
             var sel = dom.trackSelect;
             while (sel.options.length > 1) sel.remove(1);
             for (var i = 0; i < seqSettings.audioTracks.length; i++) {
                 var t = seqSettings.audioTracks[i];
                 var opt = document.createElement("option");
                 opt.value = String(t.index);
-                opt.textContent = t.name + " (" + t.clipCount + " clips)";
+                opt.textContent = "A" + (t.index + 1) + " · " + t.name + " (" + t.clipCount + " clips)";
                 sel.appendChild(opt);
             }
-            lastLoadedClips = null;
+            sel.value = previous;
+            if (!sel.value) sel.value = "all";
+            dom.sequenceName.textContent = seqSettings.name;
+            dom.sequenceDetail.textContent = seqSettings.audioTracks.length + " audio tracks · " + seqSettings.videoTracks.length + " video tracks";
+            updateSourceWarning();
+            setBusy(false);
+            hideStatus();
+            if (dom.btnAnalyze.disabled) showStatus("This sequence has no audio clips. Add audio, then choose Refresh.", "info");
+            if (callback) callback(!dom.btnAnalyze.disabled);
         });
     }
 
@@ -282,50 +397,41 @@
     // ============================================================
 
     function runAutoDetect() {
-        dom.btnAuto.disabled = true;
-        dom.btnAnalyze.disabled = true;
-        dom.noiseHint.classList.add("hidden");
-        showProgress("Loading clips for auto-detect...", 5);
-
-        getClips(function (err, clips) {
-            if (err) {
-                showStatus(err, "error");
-                hideProgress();
-                dom.btnAuto.disabled = false;
-                dom.btnAnalyze.disabled = false;
-                return;
-            }
-
-            showProgress("Scanning audio levels...", 15);
-
-            // Collect amplitude samples from all clips (up to first 60s per clip, max 3 clips)
-            var sampleClips = clips.slice(0, 3);
-            var allWindowDb = [];
-            var idx = 0;
-            var loadFails = 0;
-
-            function scanNext() {
-                if (idx >= sampleClips.length) {
-                    finishAutoDetect(allWindowDb, loadFails, clips.length);
+        if (busy) return;
+        refreshTrackList(function (ready) {
+            if (!ready) return;
+            setBusy(true);
+            dom.noiseHint.classList.add("hidden");
+            showProgress("Loading audio for the threshold estimate...", 5);
+            getClips(function (err, clips) {
+                if (err) {
+                    showStatus(err, "error");
+                    hideProgress();
+                    setBusy(false);
                     return;
                 }
-                var clip = sampleClips[idx++];
-                var pct = 15 + Math.round((idx / sampleClips.length) * 75);
-                showProgress("Scanning clip " + idx + " of " + sampleClips.length + "...", pct);
-
-                loadAudioBuffer(clip, function (err, buffer, usedClip) {
-                    if (err || !buffer) {
-                        loadFails++;
-                        scanNext();
+                var sampleClips = clips.slice(0, 3);
+                var allWindowDb = [];
+                var idx = 0;
+                var loadFails = 0;
+                function scanNext() {
+                    if (idx >= sampleClips.length) {
+                        finishAutoDetect(allWindowDb, loadFails, sampleClips.length);
                         return;
                     }
-                    var dbValues = collectWindowDb(buffer, usedClip);
-                    for (var i = 0; i < dbValues.length; i++) allWindowDb.push(dbValues[i]);
-                    scanNext();
-                });
-            }
-
-            scanNext();
+                    var clip = sampleClips[idx++];
+                    showProgress("Estimating from clip " + idx + " of " + sampleClips.length + "...", 15 + Math.round(idx / sampleClips.length * 75));
+                    loadAudioBuffer(clip, function (err, buffer, usedClip) {
+                        if (err || !buffer) loadFails++;
+                        else {
+                            var values = collectWindowDb(buffer, usedClip);
+                            for (var i = 0; i < values.length; i++) allWindowDb.push(values[i]);
+                        }
+                        scanNext();
+                    });
+                }
+                scanNext();
+            });
         });
     }
 
@@ -373,31 +479,23 @@
      *   2. Find the noise floor (5th percentile = mostly quiet)
      *   3. Find the speech level (70th percentile = typical vocal content)
      *   4. Threshold = noise_floor + 30% of the gap toward speech
-     *   5. Clamp to -55dB .. -15dB
+     *   5. Clamp to -95dB .. -15dB
      */
     function finishAutoDetect(allDb, loadFails, totalClips) {
         hideProgress();
-        dom.btnAuto.disabled = false;
-        dom.btnAnalyze.disabled = false;
-
+        setBusy(false);
         if (allDb.length === 0) {
-            showStatus("Auto-detect failed — could not load audio. Check console for details.", "error");
+            showStatus("Could not read audio for an estimate. Check that media is online and FFmpeg is installed for video or large audio files. Open Help for the debug log.", "error");
             return;
         }
-
         var suggestion = core.suggestThreshold(allDb);
-        var rounded = suggestion.threshold;
-
-        setThreshold(rounded, true);
-
-        // Show hint labels
-        dom.noiseFloorLabel.textContent  = "Floor: " + Math.round(suggestion.noiseFloor) + "dB";
-        dom.speechLevelLabel.textContent = "Speech: " + Math.round(suggestion.speechLevel) + "dB";
+        setThreshold(suggestion.threshold, true);
+        dom.noiseFloorLabel.textContent = "Quiet level: " + Math.round(suggestion.noiseFloor) + " dB";
+        dom.speechLevelLabel.textContent = "Louder audio: " + Math.round(suggestion.speechLevel) + " dB";
         dom.noiseHint.classList.remove("hidden");
-
-        var msg = "Auto-set to " + rounded + " dB";
-        if (loadFails > 0) msg += " (" + loadFails + " of " + totalClips + " clips skipped — codec unsupported)";
-        showStatus(msg, "success");
+        var msg = "Estimated " + suggestion.threshold + " dB. Find quiet sections to review the result.";
+        if (loadFails) msg += " Skipped " + loadFails + " of " + totalClips + " sampled clips. Check Help before editing.";
+        showStatus(msg, loadFails ? "info" : "success");
     }
 
     // ============================================================
@@ -405,24 +503,20 @@
     // ============================================================
 
     function startAnalysis() {
-        analysisResults = null;
-        hideResults();
-        dom.btnAnalyze.disabled = true;
-        dom.btnAuto.disabled = true;
-        dom.confirmActions.classList.add("hidden");
-        lastLoadedClips = null; // force fresh clip list
-
-        showProgress("Getting clip info...", 5);
-
-        getClips(function (err, clips) {
-            if (err) {
-                showStatus(err, "error");
-                hideProgress();
-                dom.btnAnalyze.disabled = false;
-                dom.btnAuto.disabled = false;
-                return;
-            }
-            analyzeClips(clips);
+        if (busy) return;
+        refreshTrackList(function (ready) {
+            if (!ready) return;
+            setBusy(true);
+            showProgress("Reading audio clips...", 5);
+            getClips(function (err, clips) {
+                if (err) {
+                    showStatus(err, "error");
+                    hideProgress();
+                    setBusy(false);
+                    return;
+                }
+                analyzeClips(clips);
+            });
         });
     }
 
@@ -442,7 +536,7 @@
             }
             var clip = clips[idx++];
             var pct = 5 + Math.round((idx / clips.length) * 88);
-            showProgress("Analyzing clip " + idx + " / " + clips.length + " — " + clip.name, pct);
+            showProgress("Analyzing clip " + idx + " of " + clips.length + ": " + clip.name, pct);
 
             loadAudioBuffer(clip, function (err, buffer, usedClip) {
                 if (err || !buffer) {
@@ -540,7 +634,7 @@
             if (!ffmpegPath) {
                 console.error("  FFmpeg not found. Install: winget install ffmpeg  OR  brew install ffmpeg");
                 callback(
-                    "FFmpeg required for video files but not found.\n" +
+                    "FFmpeg is needed for this video or large audio file, but was not found.\n" +
                     "Install it:\n" +
                     "  Windows: winget install ffmpeg\n" +
                     "  Mac: brew install ffmpeg\n" +
@@ -830,48 +924,33 @@
         var merged = mergeRegions(allRegions);
         var totalSilence = 0;
         for (var i = 0; i < merged.length; i++) totalSilence += merged[i].end - merged[i].start;
-
-        analysisResults = { regions: merged, totalSilence: round3(totalSilence) };
-        setProgress(100);
-
-        setTimeout(function () {
-            hideProgress();
-            dom.btnAnalyze.disabled = false;
-            dom.btnAuto.disabled = false;
-
-            // Build status message
-            var suffix = "";
-            if (loadFails > 0 && loadFails === totalClips) {
-                // ALL clips failed — likely file access issue
-                showStatus(
-                    "Could not load any audio files. Try: Window → Preferences → Audio → ensure clips are online. " +
-                    "Video-only clips (no audio) are also skipped.",
-                    "error"
-                );
-                return;
-            }
-            if (loadFails > 0) {
-                suffix = " (" + loadFails + "/" + totalClips + " clips skipped — codec or offline)";
-            }
-
-            if (merged.length === 0) {
-                showStatus(
-                    "No silence found at " + dom.threshold.value + "dB" + suffix +
-                    ". Try the Auto button or raise the threshold.",
-                    "info"
-                );
-                return;
-            }
-
-            dom.regionCount.textContent = merged.length + " region" + (merged.length !== 1 ? "s" : "");
-            dom.totalSilence.textContent = formatDuration(totalSilence) + " total";
-            dom.results.classList.remove("hidden");
-            dom.confirmActions.classList.remove("hidden");
-            showStatus(
-                "Found " + merged.length + " silent regions" + suffix + ". Review the timeline action, then apply.",
-                "success"
-            );
-        }, 200);
+        hideProgress();
+        if (loadFails === totalClips) {
+            setBusy(false);
+            showStatus("Could not read any audio. Check that media is online. Video and large audio files need FFmpeg. Open Help for the debug log.", "error");
+            return;
+        }
+        var suffix = loadFails ? " Skipped " + loadFails + " of " + totalClips + " clips. These results are incomplete." : "";
+        if (!merged.length) {
+            setBusy(false);
+            showStatus("No quiet sections found at " + dom.threshold.value + " dB. Try Estimate threshold or a higher value." + suffix, "info");
+            return;
+        }
+        analysisResults = { regions: merged, totalSilence: round3(totalSilence), sequenceID: seqSettings.sequenceID };
+        dom.regionCount.textContent = merged.length + " region" + (merged.length === 1 ? "" : "s");
+        dom.totalSilence.textContent = formatDuration(totalSilence) + " of quiet audio";
+        dom.analysisSummary.textContent = "Analyzed " + (totalClips - loadFails) + " of " + totalClips + " clips at " + dom.threshold.value + " dB. If you edit the timeline, find quiet sections again." + suffix;
+        document.querySelector('input[name="cut-mode"][value="markers"]').checked = true;
+        dom.confirmEdit.checked = false;
+        renderRegions();
+        dom.results.classList.remove("hidden");
+        dom.confirmActions.classList.remove("hidden");
+        dom.btnAnalyze.classList.add("hidden");
+        setBusy(false);
+        showStatus("Review the highlighted sections before choosing an action." + suffix, loadFails ? "info" : "success");
+        var heading = document.getElementById("results-heading");
+        heading.focus();
+        heading.scrollIntoView({ block: "start" });
     }
 
     function mergeRegions(regions) {
@@ -894,50 +973,37 @@
     // ============================================================
 
     function executeRemoval() {
-        if (!analysisResults || !analysisResults.regions.length) {
-            showStatus("No results. Run analysis first.", "error"); return;
-        }
-
+        if (busy || !analysisResults || !analysisResults.regions.length) return;
         var mode = getSelectedMode();
+        if (mode !== "markers" && !dom.confirmEdit.checked) return;
         var modeInfo = core.modeInfo(mode);
-        var trackIndices = getSelectedTrackIndices();
-        var esc = function (s) { return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"; };
-        var regionsStr  = JSON.stringify(analysisResults.regions);
-        var tracksStr   = JSON.stringify(trackIndices);
-
-        dom.btnExecute.disabled = true;
-        dom.btnCancel.disabled  = true;
+        var args = [JSON.stringify(analysisResults.regions), JSON.stringify(getSelectedTrackIndices()), mode, analysisResults.sequenceID];
+        var encoded = args.map(function (value) { return JSON.stringify(value); });
+        setBusy(true);
         showStatus(modeInfo.progress, "info");
-
-        var call;
-        if (mode === "markers") {
-            call = "addSilenceMarkers(" + esc(regionsStr) + ")";
-        } else if (mode === "disable") {
-            call = "disableSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
-        } else if (mode === "lift") {
-            call = "liftDeleteSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
-        } else {
-            call = "rippleDeleteSilentRegions(" + esc(regionsStr) + "," + esc(tracksStr) + ")";
-        }
-
-        evalScript(call, function (resp) {
-            dom.btnExecute.disabled = false;
-            dom.btnCancel.disabled  = false;
+        evalScript("applyReviewedSilence(" + encoded.join(",") + ")", function (resp) {
             var r = parseResp(resp);
             if (r && r.success) {
                 var count = r.data.markersAdded || r.data.disabledCount || r.data.deletedCount || 0;
-                showStatus(count + " " + modeInfo.result + ". Ctrl+Z to undo.", "success");
                 cancelAnalysis();
+                setBusy(false);
+                showStatus(count + " " + modeInfo.result + ". Review the sequence in Premiere.", count ? "success" : "info");
             } else {
-                showStatus("Error: " + (r ? r.error : "Unknown"), "error");
+                setBusy(false);
+                showStatus(r ? r.error : "Premiere did not confirm the action. Inspect the timeline and debug log before retrying.", "error");
             }
         });
     }
 
     function cancelAnalysis() {
         analysisResults = null;
+        selectedRegion = 0;
+        dom.confirmEdit.checked = false;
         hideResults();
         dom.confirmActions.classList.add("hidden");
+        dom.btnAnalyze.textContent = "Find quiet sections";
+        dom.btnAnalyze.className = "btn btn-accent";
+        updateModeUi();
     }
 
     // ============================================================
@@ -945,13 +1011,14 @@
     // ============================================================
 
     function clearMarkers() {
+        if (busy) return;
+        if (!window.confirm('Remove every marker named "Silence" from the active sequence? This also includes markers not created by DeadAir.')) return;
+        setBusy(true);
         evalScript("clearSilenceMarkers()", function (resp) {
+            setBusy(false);
             var r = parseResp(resp);
-            if (r && r.success) {
-                showStatus("Removed " + r.data.removed + " silence markers.", "success");
-            } else {
-                showStatus("Failed: " + (r ? r.error : "Unknown"), "error");
-            }
+            if (r && r.success) showStatus("Removed " + r.data.removed + " markers named Silence.", "success");
+            else showStatus(r ? r.error : "Premiere did not confirm marker removal. Check the sequence before retrying.", "error");
         });
     }
 
@@ -964,8 +1031,7 @@
             localStorage.setItem("deadair_settings", JSON.stringify({
                 threshold:   dom.threshold.value,
                 minDuration: dom.minDuration.value,
-                padding:     dom.padding.value,
-                cutMode:     getSelectedMode()
+                padding:     dom.padding.value
             }));
         } catch (e) {}
     }
@@ -975,14 +1041,11 @@
             var raw = localStorage.getItem("deadair_settings");
             if (!raw) return;
             var s = JSON.parse(raw);
-            if (s.threshold)   setThreshold(s.threshold, false);
-            if (s.minDuration) { dom.minDuration.value = s.minDuration; dom.durationValue.textContent = parseFloat(s.minDuration).toFixed(1) + "s"; }
-            if (s.padding)     { dom.padding.value = s.padding; dom.paddingValue.textContent = s.padding + "ms"; }
-            if (s.cutMode) {
-                var radio = document.querySelector('input[name="cut-mode"][value="' + s.cutMode + '"]');
-                if (radio) radio.checked = true;
-            }
-        } catch (e) {}
+            if (s.threshold !== undefined) setThreshold(s.threshold, false);
+            if (s.minDuration !== undefined) dom.minDuration.value = dom.durationNumber.value = core.normalizeSetting(s.minDuration, 0.1, 5, 0.1, 0.8);
+            if (s.padding !== undefined) dom.padding.value = dom.paddingNumber.value = core.normalizeSetting(s.padding, 0, 500, 10, 100);
+            // Each analysis starts with marker review, even if an older panel saved a removal mode.
+        } catch (e) { console.warn("Saved settings could not be read. Using defaults."); }
     }
 
     // ============================================================
@@ -1028,8 +1091,7 @@
     function round3(n) { return Math.round(n * 1000) / 1000; }
 
     function formatDuration(sec) {
-        if (sec < 60) return sec.toFixed(1) + "s";
-        return Math.floor(sec / 60) + "m " + Math.round(sec % 60) + "s";
+        return core.formatDuration(sec);
     }
 
     function showStatus(msg, type) {
@@ -1038,13 +1100,16 @@
         dom.statusBar.classList.remove("hidden");
     }
 
-    function hideStatus()   { dom.statusBar.classList.add("hidden"); }
+    function hideStatus()   { dom.statusText.textContent = ""; dom.statusBar.className = "status-bar is-empty"; }
     function showProgress(text, pct) {
         dom.progressContainer.classList.remove("hidden");
         dom.progressText.textContent = text;
-        if (pct !== undefined) dom.progressFill.style.width = pct + "%";
+        if (pct !== undefined) setProgress(pct);
     }
-    function setProgress(pct) { dom.progressFill.style.width = pct + "%"; }
+    function setProgress(pct) {
+        dom.progressFill.style.width = pct + "%";
+        dom.progressFill.parentNode.setAttribute("aria-valuenow", String(pct));
+    }
     function hideProgress()  { dom.progressContainer.classList.add("hidden"); }
     function hideResults()   { dom.results.classList.add("hidden"); }
 
