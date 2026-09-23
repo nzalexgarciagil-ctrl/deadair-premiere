@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,151 +8,137 @@
 </head>
 <body>
     <div id="app">
-        <!-- Header -->
-        <div class="header">
-            <h1>DEADAIR</h1>
-            <span class="subtitle">Silence Remover</span>
-        </div>
+        <header class="header">
+            <h1>DeadAir</h1>
+            <span class="subtitle">Find quiet sections. Review before editing.</span>
+        </header>
 
-        <!-- Status Bar -->
-        <div id="status-bar" class="status-bar hidden">
-            <span id="status-text"></span>
-        </div>
-
-        <!-- Settings -->
-        <div class="settings">
-            <div class="setting-group">
-                <div class="setting-row">
-                    <label for="threshold">Silence Threshold</label>
-                    <div class="row-right">
-                        <div class="number-field">
-                            <input type="number" id="threshold-number" min="-100" max="-10" value="-35" step="1" aria-label="Silence threshold in decibels">
-                            <span>dB</span>
-                        </div>
-                        <button id="btn-auto" class="btn-auto" title="Estimate the threshold from the selected audio">Auto</button>
-                    </div>
+        <main id="panel-content">
+            <section class="section" aria-labelledby="source-heading">
+                <div class="section-heading">
+                    <h2 id="source-heading">1. Choose your audio</h2>
+                    <button id="btn-refresh" class="btn-small" type="button">Refresh</button>
                 </div>
-                <input type="range" id="threshold" min="-100" max="-10" value="-35" step="1">
-                <div class="range-scale" aria-hidden="true">
-                    <span>-100 dB</span>
-                    <span>-10 dB</span>
-                </div>
-                <div id="noise-hint" class="noise-hint hidden">
-                    <span id="noise-floor-label"></span>
-                    <span id="speech-level-label"></span>
-                </div>
-            </div>
-
-            <div class="setting-group">
-                <div class="setting-row">
-                    <label>Min Silence Duration</label>
-                    <span class="value" id="duration-value">0.8s</span>
-                </div>
-                <input type="range" id="min-duration" min="0.1" max="5.0" value="0.8" step="0.1">
-            </div>
-
-            <div class="setting-group">
-                <div class="setting-row">
-                    <label>Padding</label>
-                    <span class="value" id="padding-value">100ms</span>
-                </div>
-                <input type="range" id="padding" min="0" max="500" value="100" step="10">
-            </div>
-
-            <div class="setting-group">
-                <div class="setting-row">
-                    <label>Analyze Track</label>
-                </div>
-                <select id="track-select">
-                    <option value="all">All Audio Tracks</option>
+                <p id="sequence-name" class="sequence-name">Connecting to Premiere...</p>
+                <p id="sequence-detail" class="helper">Open the sequence you want to review.</p>
+                <label for="track-select">Analyze audio from</label>
+                <select id="track-select" aria-describedby="source-help" disabled>
+                    <option value="all">All audio tracks</option>
                 </select>
-            </div>
+                <p id="source-help" class="helper">Choose the track with your dialogue. This selects the audio to analyze, not the tracks to edit.</p>
+                <p id="multi-track-warning" class="notice hidden">All tracks combines quiet sections from any selected track. Another track may still contain speech. Review each region.</p>
+            </section>
 
-            <fieldset class="setting-group mode-fieldset">
-                <legend>Timeline Action</legend>
-                <div class="radio-group">
-                    <label class="radio-label">
-                        <input type="radio" name="cut-mode" value="ripple" checked>
-                        <span class="radio-custom"></span>
-                        <span class="radio-copy">
-                            <strong>Close gaps</strong>
-                            <small>Remove silence and pull later clips left.</small>
-                        </span>
-                    </label>
-                    <label class="radio-label">
-                        <input type="radio" name="cut-mode" value="lift">
-                        <span class="radio-custom"></span>
-                        <span class="radio-copy">
-                            <strong>Leave gaps</strong>
-                            <small>Remove silence without moving later clips.</small>
-                        </span>
-                    </label>
-                    <label class="radio-label">
-                        <input type="radio" name="cut-mode" value="disable">
-                        <span class="radio-custom"></span>
-                        <span class="radio-copy">
-                            <strong>Disable</strong>
-                            <small>Keep the cut pieces in place but turn them off.</small>
-                        </span>
-                    </label>
-                    <label class="radio-label">
-                        <input type="radio" name="cut-mode" value="markers">
-                        <span class="radio-custom"></span>
-                        <span class="radio-copy">
-                            <strong>Markers only</strong>
-                            <small>Review every region before changing clips.</small>
-                        </span>
-                    </label>
+            <section class="section settings" aria-labelledby="settings-heading">
+                <h2 id="settings-heading">2. Set detection</h2>
+                <div class="setting-group">
+                    <div class="setting-row">
+                        <label for="threshold-number">Silence threshold</label>
+                        <div class="number-field">
+                            <input type="number" id="threshold-number" min="-100" max="-10" value="-35" step="1" aria-describedby="threshold-help">
+                            <span aria-hidden="true">dB</span>
+                        </div>
+                    </div>
+                    <input type="range" id="threshold" min="-100" max="-10" value="-35" step="1" aria-label="Silence threshold in decibels" aria-describedby="threshold-help">
+                    <div class="range-scale" aria-hidden="true"><span>-100 dB</span><span>-10 dB</span></div>
+                    <p id="threshold-help" class="helper">Audio below this level counts as quiet. Raise the value to detect more.</p>
+                    <button id="btn-auto" class="btn-small estimate-button" type="button" disabled>Estimate threshold</button>
+                    <div id="noise-hint" class="noise-hint hidden"><span id="noise-floor-label"></span><span id="speech-level-label"></span></div>
                 </div>
-            </fieldset>
-        </div>
+                <div class="setting-group">
+                    <div class="setting-row">
+                        <label for="duration-number">Minimum quiet time</label>
+                        <div class="number-field">
+                            <input type="number" id="duration-number" min="0.1" max="5" value="0.8" step="0.1" aria-describedby="duration-help">
+                            <span aria-hidden="true">s</span>
+                        </div>
+                    </div>
+                    <input type="range" id="min-duration" min="0.1" max="5" value="0.8" step="0.1" aria-label="Minimum quiet time in seconds" aria-describedby="duration-help">
+                    <p id="duration-help" class="helper">Ignore quiet sections shorter than this.</p>
+                </div>
+                <div class="setting-group">
+                    <div class="setting-row">
+                        <label for="padding-number">Keep around speech</label>
+                        <div class="number-field">
+                            <input type="number" id="padding-number" min="0" max="500" value="100" step="10" aria-describedby="padding-help">
+                            <span aria-hidden="true">ms</span>
+                        </div>
+                    </div>
+                    <input type="range" id="padding" min="0" max="500" value="100" step="10" aria-label="Padding in milliseconds" aria-describedby="padding-help">
+                    <p id="padding-help" class="helper">Keep this much audio at each edge of a quiet section so words are not cut short.</p>
+                </div>
+            </section>
 
-        <!-- Progress Bar -->
-        <div id="progress-container" class="hidden">
-            <div class="progress-bar">
-                <div id="progress-fill" class="progress-fill"></div>
+            <section id="results" class="section results hidden" aria-labelledby="results-heading">
+                <h2 id="results-heading" tabindex="-1">3. Review quiet sections</h2>
+                <p class="results-info"><strong id="region-count">0 regions</strong><span id="total-silence">0 s of quiet audio</span></p>
+                <p id="analysis-summary" class="helper"></p>
+                <div id="region-map" class="region-map" role="img" aria-label="Quiet section positions within the sequence"></div>
+                <p class="helper">Highlighted sections show positions, not an audio waveform.</p>
+                <label for="region-select">Region to review</label>
+                <select id="region-select"></select>
+                <div class="region-navigation">
+                    <button id="btn-previous" class="btn-small" type="button">Previous</button>
+                    <button id="btn-next" class="btn-small" type="button">Next</button>
+                </div>
+                <button id="btn-preview" class="btn btn-secondary" type="button">Show in timeline</button>
+                <p class="helper">Moves the playhead to the region start. Play the sequence in Premiere to listen.</p>
+
+                <fieldset class="mode-fieldset">
+                    <legend>What should happen?</legend>
+                    <div class="radio-group">
+                        <label class="radio-label">
+                            <input type="radio" name="cut-mode" value="markers" checked>
+                            <span class="radio-copy"><strong>Markers only</strong><small>Add review markers. Leave clips unchanged.</small></span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="cut-mode" value="disable">
+                            <span class="radio-copy"><strong>Disable sections</strong><small>Split clips and turn quiet pieces off. Keep their positions.</small></span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="cut-mode" value="lift">
+                            <span class="radio-copy"><strong>Remove and leave gaps</strong><small>Delete quiet pieces. Keep later clips in place.</small></span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="cut-mode" value="ripple">
+                            <span class="radio-copy"><strong>Remove and close gaps</strong><small>Delete quiet pieces and move clips earlier.</small></span>
+                        </label>
+                    </div>
+                </fieldset>
+                <p id="affected-tracks" class="scope-summary"></p>
+                <p id="timing-summary" class="helper"></p>
+                <p id="edit-warning" class="notice hidden"></p>
+                <label id="edit-acknowledgement" class="acknowledgement hidden"><input id="confirm-edit" type="checkbox">I saved a copy of this sequence and reviewed the affected tracks.</label>
+            </section>
+
+            <details class="troubleshooting">
+                <summary>Help and troubleshooting</summary>
+                <p class="helper">Video files and audio files of 150 MB or more need FFmpeg. Restart Premiere after installing it.</p>
+                <p class="helper">If analysis skips a clip, check that its source media is online. The debug log contains file paths. Review it before sharing.</p>
+                <button id="btn-toggle-log" class="btn-small" type="button" aria-controls="debug-panel" aria-expanded="false">Show debug log</button>
+                <div id="debug-panel" class="debug-panel hidden">
+                    <div class="debug-header"><span>Debug log</span><div><button id="btn-copy-log" class="btn-small" type="button">Copy</button><button id="btn-clear-log" class="btn-small" type="button">Clear</button></div></div>
+                    <div id="debug-log" class="debug-log" tabindex="0" aria-label="Debug log"></div>
+                </div>
+                <p class="helper">Clear markers removes every sequence marker named “Silence”, including markers created outside DeadAir.</p>
+                <button id="btn-clear-markers" class="btn-small" type="button" disabled>Clear markers named Silence</button>
+            </details>
+        </main>
+
+        <footer class="action-bar">
+            <div id="status-bar" class="status-bar" role="status" aria-live="polite" aria-atomic="true"><span id="status-text"></span></div>
+            <div id="progress-container" class="hidden">
+                <div class="progress-bar" role="progressbar" aria-label="Audio analysis" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-fill" class="progress-fill"></div></div>
+                <span id="progress-text" class="helper">Analyzing...</span>
             </div>
-            <span id="progress-text" class="progress-text">Analyzing...</span>
-        </div>
-
-        <!-- Results -->
-        <div id="results" class="results hidden">
-            <div class="results-info">
-                <span id="region-count">0 regions</span>
-                <span class="separator">|</span>
-                <span id="total-silence">0s total</span>
-            </div>
-        </div>
-
-        <!-- Action Buttons -->
-        <div class="actions">
-            <button id="btn-analyze" class="btn btn-primary">Analyze Silence</button>
+            <button id="btn-analyze" class="btn btn-accent" type="button" disabled>Find quiet sections</button>
             <div id="confirm-actions" class="hidden">
-                <button id="btn-execute" class="btn btn-accent">Remove and close gaps</button>
-                <button id="btn-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="btn-execute" class="btn btn-accent" type="button">Add silence markers</button>
+                <button id="btn-cancel" class="btn btn-secondary" type="button">Clear results</button>
             </div>
-        </div>
-
-        <!-- Footer -->
-        <div class="footer">
-            <button id="btn-clear-markers" class="btn-link" title="Remove all DeadAir markers">Clear Markers</button>
-            <button id="btn-toggle-log" class="btn-link">Debug Log</button>
-            <span class="version">v1.2.0</span>
-        </div>
-
-        <!-- Debug Console -->
-        <div id="debug-panel" class="debug-panel hidden">
-            <div class="debug-header">
-                <span>Console</span>
-                <div style="display:flex;gap:8px">
-                    <button id="btn-copy-log" class="btn-link">Copy</button>
-                    <button id="btn-clear-log" class="btn-link">Clear</button>
-                </div>
-            </div>
-            <div id="debug-log" class="debug-log"></div>
-        </div>
+            <span class="version">DeadAir 1.2.0</span>
+        </footer>
     </div>
-
     <script src="CSInterface.js"></script>
     <script src="core.js"></script>
     <script src="main.js"></script>

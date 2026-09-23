@@ -11,5 +11,8 @@
   "scripts": {
     "test": "node --test",
     "validate": "node --check client/core.js && node --check client/main.js && node -e \"new Function(require('node:fs').readFileSync('host/deadair.jsx', 'utf8'))\" && node --test"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
   }
 }

@@ -1,4 +1,5 @@
 node_modules/
+.working/
 settings.json
 *.zip
 .DS_Store

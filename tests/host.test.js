@@ -146,3 +146,56 @@ test("removal engine safely ignores an empty region list", () => {
     const host = loadHost();
     assert.equal(host.removeTimeRangesCore({}, [], [], "lift"), 0);
 });
+
+test("sequence metadata exposes stable identity and converts duration ticks", () => {
+    const timeline = createTimeline();
+    timeline.sequence.sequenceID = "review-copy";
+    timeline.sequence.name = "Review copy";
+    timeline.sequence.end = String(10 * 254016000000);
+    const host = loadHost(timeline.sequence);
+    const response = JSON.parse(host.getSequenceInfo());
+    assert.equal(response.success, true);
+    assert.equal(response.data.sequenceID, "review-copy");
+    assert.equal(response.data.durationSecs, 10);
+});
+
+test("region preview seeks with a ticks string only on the analyzed sequence", () => {
+    const positions = [];
+    const host = loadHost({ sequenceID: "review-copy", setPlayerPosition(ticks) { positions.push(ticks); return true; } });
+    assert.equal(JSON.parse(host.previewSilenceRegion("review-copy", 1.5)).success, true);
+    assert.deepEqual(positions, [String(1.5 * 254016000000)]);
+    for (const seconds of [-1, NaN, Infinity, "1.5"]) {
+        assert.equal(JSON.parse(host.previewSilenceRegion("review-copy", seconds)).success, false);
+    }
+    assert.equal(JSON.parse(host.previewSilenceRegion("another-sequence", 2)).success, false);
+    assert.equal(positions.length, 1);
+});
+
+test("region preview reports missing sequence and refused playhead movement", () => {
+    assert.equal(JSON.parse(loadHost(null).previewSilenceRegion("review-copy", 1)).success, false);
+    const host = loadHost({ sequenceID: "review-copy", setPlayerPosition() { return false; } });
+    const response = JSON.parse(host.previewSilenceRegion("review-copy", 1));
+    assert.equal(response.success, false);
+    assert.match(response.error, /could not move the playhead/);
+});
+
+test("reviewed actions preserve action routing and reject a different active sequence", () => {
+    const host = loadHost({ sequenceID: "review-copy" });
+    const calls = [];
+    const routes = {
+        markers: "addSilenceMarkers", disable: "disableSilentRegions",
+        lift: "liftDeleteSilentRegions", ripple: "rippleDeleteSilentRegions"
+    };
+    for (const [mode, name] of Object.entries(routes)) {
+        host[name] = (...args) => { calls.push({ mode, args }); return "routed"; };
+        assert.equal(host.applyReviewedSilence("[]", "[0]", mode, "review-copy"), "routed");
+    }
+    assert.equal(calls.length, 4);
+    assert.deepEqual(calls[0].args, ["[]"]);
+    assert.deepEqual(calls[2].args, ["[]", "[0]"]);
+    const mismatch = JSON.parse(host.applyReviewedSilence("[]", "[0]", "ripple", "another-sequence"));
+    assert.equal(mismatch.success, false);
+    assert.match(mismatch.error, /active sequence changed/);
+    assert.equal(JSON.parse(host.applyReviewedSilence("[]", "[0]", "unknown", "review-copy")).success, false);
+    assert.equal(calls.length, 4);
+});

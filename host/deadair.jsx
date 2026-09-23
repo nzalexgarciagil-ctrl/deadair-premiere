@@ -114,7 +114,7 @@ function getSequenceInfo() {
 
         // Duration in seconds
         var durationSecs = 0;
-        try { durationSecs = getSeconds(seq.end); } catch (e) {}
+        try { durationSecs = parseFloat(seq.end) / TICKS_PER_SECOND; } catch (e) {}
 
         var audioTracks = [];
         for (var i = 0; i < seq.audioTracks.numTracks; i++) {
@@ -129,6 +129,7 @@ function getSequenceInfo() {
 
         return result({
             name:          seq.name,
+            sequenceID:    String(seq.sequenceID),
             fps:           fps,
             frameDuration: frameDuration,
             width:         width,
@@ -138,6 +139,43 @@ function getSequenceInfo() {
             videoTracks:   videoTracks
         });
     } catch (e) { return error("getSequenceInfo: " + e.toString()); }
+}
+
+// ============================================================
+// REVIEW NAVIGATION AND ACTION ROUTING
+// ============================================================
+
+function reviewedSequence(sequenceID) {
+    var seq = app.project.activeSequence;
+    if (!seq) throw new Error("Open the sequence you analyzed, then try again.");
+    if (!sequenceID || String(seq.sequenceID) !== String(sequenceID)) {
+        throw new Error("The active sequence changed. Find quiet sections again before reviewing or applying results.");
+    }
+    return seq;
+}
+
+function previewSilenceRegion(sequenceID, seconds) {
+    try {
+        var seq = reviewedSequence(sequenceID);
+        if (typeof seconds !== "number" || !isFinite(seconds) || seconds < 0) {
+            return error("This region has an invalid start time. Find quiet sections again.");
+        }
+        if (!seq.setPlayerPosition(secondsToTicks(seconds))) {
+            return error("Premiere could not move the playhead. Open the timeline and try again.");
+        }
+        return result({ positionSeconds: seconds });
+    } catch (e) { return error(e.toString()); }
+}
+
+function applyReviewedSilence(regionsStr, trackIndicesStr, mode, sequenceID) {
+    try {
+        reviewedSequence(sequenceID);
+        if (mode === "markers") return addSilenceMarkers(regionsStr);
+        if (mode === "disable") return disableSilentRegions(regionsStr, trackIndicesStr);
+        if (mode === "lift") return liftDeleteSilentRegions(regionsStr, trackIndicesStr);
+        if (mode === "ripple") return rippleDeleteSilentRegions(regionsStr, trackIndicesStr);
+        return error("Choose a timeline action before applying results.");
+    } catch (e) { return error(e.toString()); }
 }
 
 // ============================================================
